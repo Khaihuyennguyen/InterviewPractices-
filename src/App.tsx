@@ -10,7 +10,28 @@ import {
   Play, Download, Upload, Target, Flame, Search, ArrowRight, BookOpen, Layers
 } from 'lucide-react';
 import { cn } from './lib/utils';
-import { differenceInDays, differenceInCalendarDays, parseISO } from 'date-fns';
+import { differenceInDays, differenceInCalendarDays, parseISO, format } from 'date-fns';
+
+export interface GoalSettings {
+  targetDate: string; // YYYY-MM-DD
+  targetCount: number;
+}
+
+const GOAL_STORAGE_KEY = 'coderecall_target_goal_v1';
+
+function getInitialGoal(): GoalSettings {
+  try {
+    const saved = localStorage.getItem(GOAL_STORAGE_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (parsed.targetDate && parsed.targetCount) return parsed;
+    }
+  } catch (e) {}
+  return {
+    targetDate: `${new Date().getFullYear()}-12-31`,
+    targetCount: 1000,
+  };
+}
 
 export default function App() {
   const [links, setLinks] = useState<PracticeLink[]>(() => getInitialProblems());
@@ -19,6 +40,12 @@ export default function App() {
   const [activeSubTopic, setActiveSubTopic] = useState<string | 'all'>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [onlyDue, setOnlyDue] = useState(false);
+
+  // Goal & Countdown State
+  const [goalSettings, setGoalSettings] = useState<GoalSettings>(getInitialGoal);
+  const [isGoalModalOpen, setIsGoalModalOpen] = useState(false);
+  const [tempGoalDate, setTempGoalDate] = useState(goalSettings.targetDate);
+  const [tempGoalCount, setTempGoalCount] = useState(goalSettings.targetCount.toString());
 
   // Practice session state
   const [isPracticing, setIsPracticing] = useState(false);
@@ -50,21 +77,28 @@ export default function App() {
     saveLocalProblems(links);
   }, [links]);
 
-  // May 15 Deadline Calculation
+  // Target Deadline & Pace Calculation
   const deadlineInfo = useMemo(() => {
     const now = getNowInTZ();
-    const currentYear = now.getFullYear();
-    // Deadline: May 15 of current year, or next year if May 15 has already passed
-    let deadline = new Date(currentYear, 4, 15, 23, 59, 59);
-    if (now > deadline) {
-      deadline = new Date(currentYear + 1, 4, 15, 23, 59, 59);
-    }
-    const daysRemaining = Math.max(0, differenceInCalendarDays(deadline, now));
+    const target = new Date(`${goalSettings.targetDate}T23:59:59`);
+    const daysRemaining = Math.max(0, differenceInCalendarDays(target, now));
+    const targetCount = goalSettings.targetCount;
+    const solvedCount = links.length;
+    const remainingProblems = Math.max(0, targetCount - solvedCount);
+    const dailyPace = daysRemaining > 0 ? Math.ceil(remainingProblems / daysRemaining) : remainingProblems;
+    const progressPercent = Math.min(100, Math.round((solvedCount / targetCount) * 100));
+
     return {
-      deadlineDate: deadline,
+      deadlineDate: target,
+      formattedDate: format(target, 'MMM d, yyyy'),
       daysRemaining,
+      targetCount,
+      solvedCount,
+      remainingProblems,
+      dailyPace,
+      progressPercent,
     };
-  }, []);
+  }, [goalSettings, links.length]);
 
   // Subtopics list
   const subTopics = useMemo(() => {
@@ -467,29 +501,63 @@ export default function App() {
         {/* Top Hero: Deadline Countdown & Smart Recommendation */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           
-          {/* Target Deadline Card */}
+          {/* Target Deadline & Problem Count Goal Card */}
           <div className="bg-gradient-to-br from-gray-900 to-gray-800 text-white rounded-3xl p-6 shadow-md flex flex-col justify-between relative overflow-hidden">
             <div className="absolute right-0 top-0 translate-x-4 -translate-y-4 w-36 h-36 bg-blue-500/10 rounded-full blur-2xl pointer-events-none" />
             <div>
               <div className="flex items-center justify-between mb-4">
                 <span className="px-3 py-1 bg-white/10 rounded-full text-[10px] font-mono font-semibold uppercase tracking-wider text-blue-200 flex items-center gap-1.5">
                   <Target className="w-3.5 h-3.5 text-blue-400" />
-                  Interview Target
+                  Interview Goal
                 </span>
-                <span className="text-xs font-mono text-gray-400">May 15</span>
+                <button
+                  onClick={() => {
+                    setTempGoalDate(goalSettings.targetDate);
+                    setTempGoalCount(goalSettings.targetCount.toString());
+                    setIsGoalModalOpen(true);
+                  }}
+                  className="px-2.5 py-1 bg-white/10 hover:bg-white/20 rounded-lg text-[11px] font-mono text-gray-300 hover:text-white transition-colors flex items-center gap-1.5"
+                  title="Customize Target Deadline & Problems Count"
+                >
+                  <Pencil className="w-3 h-3" />
+                  <span>Edit Goal</span>
+                </button>
               </div>
-              <p className="text-xs text-gray-400 font-mono uppercase tracking-wider">Countdown</p>
-              <div className="flex items-baseline gap-2 mt-1">
-                <span className="text-4xl sm:text-5xl font-serif font-bold text-white tracking-tight">
-                  {deadlineInfo.daysRemaining}
-                </span>
-                <span className="text-sm font-mono text-gray-300">days left</span>
+
+              <div>
+                <p className="text-xs text-gray-400 font-mono uppercase tracking-wider">
+                  Target: {deadlineInfo.formattedDate}
+                </p>
+                <div className="flex items-baseline gap-2 mt-1">
+                  <span className="text-4xl sm:text-5xl font-serif font-bold text-white tracking-tight">
+                    {deadlineInfo.daysRemaining}
+                  </span>
+                  <span className="text-sm font-mono text-gray-300">days left</span>
+                </div>
+              </div>
+
+              {/* Progress towards target count */}
+              <div className="mt-5 space-y-2">
+                <div className="flex items-center justify-between text-xs font-mono">
+                  <span className="text-gray-300">
+                    <strong className="text-white font-bold">{deadlineInfo.solvedCount}</strong> / {deadlineInfo.targetCount} problems
+                  </span>
+                  <span className="text-emerald-400 font-bold">{deadlineInfo.progressPercent}%</span>
+                </div>
+                <div className="w-full h-2 bg-white/10 rounded-full overflow-hidden">
+                  <div 
+                    className="h-full bg-gradient-to-r from-blue-400 to-emerald-400 rounded-full transition-all duration-500" 
+                    style={{ width: `${deadlineInfo.progressPercent}%` }}
+                  />
+                </div>
               </div>
             </div>
 
-            <div className="mt-6 pt-4 border-t border-white/10 flex items-center justify-between text-xs font-mono text-gray-300">
-              <span>Goal: Master SQL & Python</span>
-              <span className="text-emerald-400 font-bold">{stats.masteryPercent}% ready</span>
+            <div className="mt-5 pt-4 border-t border-white/10 flex items-center justify-between text-xs font-mono text-gray-300">
+              <span>Required Pace:</span>
+              <span className="px-2 py-0.5 bg-emerald-500/20 text-emerald-300 rounded font-bold">
+                ~{deadlineInfo.dailyPace} problems / day
+              </span>
             </div>
           </div>
 
@@ -1113,6 +1181,94 @@ export default function App() {
                   className="px-5 py-2.5 bg-gray-900 disabled:opacity-50 text-white rounded-xl text-xs font-medium hover:bg-black transition-all"
                 >
                   Confirm Import
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Goal Settings Modal */}
+      <AnimatePresence>
+        {isGoalModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-3xl p-6 sm:p-8 max-w-md w-full shadow-2xl border border-gray-100 space-y-6"
+            >
+              <div className="flex items-center justify-between pb-3 border-b border-gray-100">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 bg-blue-50 text-blue-600 rounded-xl flex items-center justify-center">
+                    <Target className="w-4 h-4" />
+                  </div>
+                  <h3 className="text-lg font-serif font-bold text-gray-900">Customize Target Goal</h3>
+                </div>
+                <button onClick={() => setIsGoalModalOpen(false)} className="p-1 text-gray-400 hover:text-gray-900 rounded-lg">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-xs font-mono uppercase tracking-wider text-gray-500 mb-1.5">
+                    Target Deadline Date
+                  </label>
+                  <input
+                    type="date"
+                    value={tempGoalDate}
+                    onChange={e => setTempGoalDate(e.target.value)}
+                    className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm font-mono focus:outline-none focus:ring-2 focus:ring-gray-900"
+                  />
+                  <p className="text-[11px] text-gray-400 mt-1">
+                    Your target completion date (default: Dec 31).
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-mono uppercase tracking-wider text-gray-500 mb-1.5">
+                    Target Problem Count
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="10000"
+                    value={tempGoalCount}
+                    onChange={e => setTempGoalCount(e.target.value)}
+                    className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm font-mono focus:outline-none focus:ring-2 focus:ring-gray-900"
+                  />
+                  <p className="text-[11px] text-gray-400 mt-1">
+                    Number of problems you want to practice & master (e.g., 1000).
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-gray-100">
+                <button
+                  type="button"
+                  onClick={() => setIsGoalModalOpen(false)}
+                  className="px-4 py-2 text-xs font-mono text-gray-500 hover:text-gray-900"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const count = Math.max(1, parseInt(tempGoalCount) || 1000);
+                    const newGoal: GoalSettings = {
+                      targetDate: tempGoalDate || `${new Date().getFullYear()}-12-31`,
+                      targetCount: count,
+                    };
+                    setGoalSettings(newGoal);
+                    try {
+                      localStorage.setItem(GOAL_STORAGE_KEY, JSON.stringify(newGoal));
+                    } catch (e) {}
+                    setIsGoalModalOpen(false);
+                  }}
+                  className="px-5 py-2.5 bg-gray-900 text-white rounded-xl text-xs font-medium hover:bg-black transition-all"
+                >
+                  Save Goal
                 </button>
               </div>
             </motion.div>
