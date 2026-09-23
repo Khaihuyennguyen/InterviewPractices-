@@ -76,7 +76,7 @@ export function importProblemsJSON(jsonStr: string): PracticeLink[] {
       id: item.id || `custom-${Date.now()}-${idx}`,
       uid: item.uid || GUEST_UID,
       title: item.title,
-      topic: item.topic === 'sql' ? 'sql' : 'python',
+      topic: item.topic || 'general',
       subTopic: item.subTopic || 'General',
       difficulty: item.difficulty || 'Intermediate',
       url: item.url || '',

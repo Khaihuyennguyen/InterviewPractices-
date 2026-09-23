@@ -341,5 +341,157 @@ class LRUCache:
     personalDifficulty: 9,
     priorityScore: 9200,
     createdAt: new Date().toISOString(),
+  },
+  {
+    id: 'starter-sd-1',
+    title: 'Design a URL Shortener (TinyURL)',
+    topic: 'system-design',
+    subTopic: 'Hashing & Scalability',
+    difficulty: 'Intermediate',
+    url: 'https://github.com/donnemartin/system-design-primer',
+    notes: 'Key tradeoffs: MD5/SHA256 truncated vs Base62 counter vs Key Generation Service (KGS). 80:20 read/write caching.',
+    questionContent: `Design a scalable URL shortening service like bit.ly or TinyURL.
+
+**Functional Requirements:**
+1. Given a long URL, return a unique, shortened alias (e.g. 7 characters).
+2. Given a short alias, redirect the user with HTTP 301/302 to original long URL.
+3. Custom alias selection (optional).
+4. Links expire after a default lifetime.
+
+**Non-Functional Requirements:**
+- High availability with sub-50ms redirect latency.
+- Scale to 500M new URLs/month and 50B redirects/month (100:1 read-to-write ratio).`,
+    solutionContent: `### High-Level Architecture:
+1. **Traffic & Capacity Estimation:**
+   - Writes: ~200 writes/sec; Reads: ~20,000 reads/sec (read-heavy).
+   - Storage (5 years): 500M * 12 * 5 = 30B records * 500 bytes = ~15 TB.
+2. **Short URL Generation:**
+   - Use **Base62** ([A-Z, a-z, 0-9]). 62^7 = ~3.5 Trillion unique URLs.
+   - **Key Generation Service (KGS)**: Generate random 7-char keys in advance in a separate database, load in memory to avoid collision detection at runtime.
+3. **Database Schema (NoSQL e.g., DynamoDB or Cassandra):**
+   - PK: short_key (string, 7 chars)
+   - long_url (string)
+   - user_id (string)
+   - created_at, expires_at (timestamp)
+4. **Caching & CDN:**
+   - Redis cluster caching the top 20% most visited URLs (Pareto Principle).
+   - HTTP 302 (Temporary Redirect) for accurate analytics tracking, or 301 (Permanent) to offload to browser cache.`,
+    repetitions: 0,
+    interval: 0,
+    easinessFactor: 2.5,
+    nextReviewDate: new Date().toISOString(),
+    totalTimeSpent: 0,
+    lastSolveTime: 0,
+    averageSolveTime: 0,
+    totalRepetitions: 0,
+    personalDifficulty: 7,
+    priorityScore: 8500,
+    createdAt: new Date().toISOString(),
+  },
+  {
+    id: 'starter-sd-2',
+    title: 'Design a Distributed Rate Limiter',
+    topic: 'system-design',
+    subTopic: 'API Gateways & Concurrency',
+    difficulty: 'Advanced',
+    url: 'https://bytebytego.com',
+    notes: 'Compare algorithms: Token Bucket, Leaky Bucket, Sliding Window Counter. Address race conditions with Redis Lua scripts.',
+    questionContent: `Design a distributed API rate limiter to protect backend services from abuse and DoS attacks (e.g., allow max 10 requests per second per IP or API key).
+
+**Requirements:**
+- Accurately limit requests with low latency overhead (< 2ms).
+- Work across a multi-server distributed cluster.
+- Return HTTP 429 (Too Many Requests) with Retry-After header when exceeded.`,
+    solutionContent: `### Solution & Trade-offs:
+1. **Algorithm Selection:**
+   - **Token Bucket**: Refills tokens at constant rate. Allows bursts up to bucket capacity. Simple, memory efficient.
+   - **Sliding Window Counter**: Balances accuracy and memory by tracking request counts in current and previous minute intervals.
+2. **Distributed Storage:**
+   - Use in-memory data store (**Redis**) for lightning-fast reads and decrements.
+   - Run **Lua scripts** on Redis to make key inspection and counter decrement atomic, preventing race conditions under high concurrent load.
+3. **Rate Limiting Architecture:**
+   - Place as a middleware in the **API Gateway** layer (e.g. Envoy, Kong, or Nginx).
+   - Header responses:
+     - \`X-Ratelimit-Remaining\`
+     - \`X-Ratelimit-Limit\`
+     - \`X-Ratelimit-Retry-After\``,
+    repetitions: 0,
+    interval: 0,
+    easinessFactor: 2.5,
+    nextReviewDate: new Date().toISOString(),
+    totalTimeSpent: 0,
+    lastSolveTime: 0,
+    averageSolveTime: 0,
+    totalRepetitions: 0,
+    personalDifficulty: 8,
+    priorityScore: 8900,
+    createdAt: new Date().toISOString(),
+  },
+  {
+    id: 'starter-qa-1',
+    title: 'Python GIL, Threads, Multiprocessing & Async',
+    topic: 'qa',
+    subTopic: 'Python Core Concepts',
+    difficulty: 'Intermediate',
+    notes: 'Know the exact differences: CPU-bound (multiprocessing) vs I/O-bound (asyncio / threading). GIL enables simple CPython memory management.',
+    questionContent: `What is the Python Global Interpreter Lock (GIL)? Why does it exist, and how does it affect CPU-bound vs I/O-bound programs? How do you achieve true parallelism in Python?`,
+    solutionContent: `### Key Talking Points:
+1. **What is the GIL?**
+   - A mutex that prevents multiple native threads from executing Python bytecodes at the same time in CPython.
+   - Only ONE thread can execute Python code at a time per process.
+2. **Why does it exist?**
+   - CPython's memory management uses reference counting. Without the GIL, reference count increments/decrements would suffer race conditions and memory leaks.
+3. **Impact on Tasks:**
+   - **I/O-Bound** (Network requests, database calls, disk I/O): Threads or \`asyncio\` work very well because the thread releases the GIL while waiting for I/O!
+   - **CPU-Bound** (Data processing, math, compression): Multiple threads will NOT speed up execution; in fact, thread switching overhead makes it slower!
+4. **Achieving True Parallelism:**
+   - Use the \`multiprocessing\` module: Spawns independent Python processes, each with its own memory space and its own GIL.
+   - Use C extensions / libraries that release the GIL (e.g., NumPy, Polars, PyTorch).
+   - Python 3.13+ free-threaded build (PEP 703 experimental nogil).`,
+    repetitions: 0,
+    interval: 0,
+    easinessFactor: 2.5,
+    nextReviewDate: new Date().toISOString(),
+    totalTimeSpent: 0,
+    lastSolveTime: 0,
+    averageSolveTime: 0,
+    totalRepetitions: 0,
+    personalDifficulty: 6,
+    priorityScore: 7800,
+    createdAt: new Date().toISOString(),
+  },
+  {
+    id: 'starter-qa-2',
+    title: 'Database Indexing: B-Trees, Clustered vs Non-Clustered',
+    topic: 'qa',
+    subTopic: 'Database Internals',
+    difficulty: 'Intermediate',
+    notes: 'Clustered index physically orders table data (only 1 per table). Non-clustered has pointers back to clustered key.',
+    questionContent: `Explain how B-Tree indexes work in relational databases (MySQL / PostgreSQL). What is the difference between a Clustered and a Non-Clustered Index? What is a Covering Index?`,
+    solutionContent: `### Key Talking Points:
+1. **B-Tree Structure:**
+   - Balanced tree where all leaf nodes are at the same depth and linked sequentially (doubly-linked list for fast range scans).
+   - Provides $O(\\log N)$ lookup, insertion, and deletion.
+2. **Clustered Index:**
+   - Determines the physical storage order of rows on disk.
+   - Leaf nodes contain the **actual row data**.
+   - Exactly **one** clustered index per table (typically the Primary Key).
+3. **Non-Clustered (Secondary) Index:**
+   - Separate structure from table data. Leaf nodes contain the indexed column values and a pointer (bookmark / clustered PK) to the row.
+   - Requires a secondary lookup ("key lookup" or "bookmark lookup") unless the query is covering.
+4. **Covering Index:**
+   - An index that contains all columns needed by the query (\`SELECT\`, \`WHERE\`, \`ORDER BY\`).
+   - The database satisfies the entire query from the index tree without touching table pages on disk!`,
+    repetitions: 0,
+    interval: 0,
+    easinessFactor: 2.5,
+    nextReviewDate: new Date().toISOString(),
+    totalTimeSpent: 0,
+    lastSolveTime: 0,
+    averageSolveTime: 0,
+    totalRepetitions: 0,
+    personalDifficulty: 5,
+    priorityScore: 7600,
+    createdAt: new Date().toISOString(),
   }
 ];

@@ -1,4 +1,4 @@
-export type Topic = 'python' | 'sql';
+export type Topic = 'python' | 'sql' | 'system-design' | 'qa' | 'algorithms' | 'data-engineering' | string;
 export type Difficulty = 'Beginner' | 'Intermediate' | 'Advanced';
 
 export interface PracticeLink {
@@ -32,19 +32,7 @@ export interface PracticeLink {
   createdAt: string;
 }
 
-export type Card = PracticeLink; // Keep alias for compatibility during transition
-
-export interface Submission {
-  id: string;
-  linkId: string;
-  uid: string;
-  audioData?: string; // base64 encoded audio
-  transcript?: string;
-  feedback?: string;
-  grade?: number; // 1-5
-  status: 'pending' | 'graded';
-  createdAt: string;
-}
+export type Card = PracticeLink; // Keep alias for compatibility
 
 export interface UserProfile {
   uid: string;

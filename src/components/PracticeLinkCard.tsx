@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { PracticeLink } from '../types';
-import { cn } from '../lib/utils';
+import { cn, formatTopicName, getTopicBadgeClass } from '../lib/utils';
 import { Check, X, RotateCcw, ExternalLink, Clock, Sparkles, Code2, Play, Pause, BookOpen, ChevronDown, ChevronUp } from 'lucide-react';
 import Markdown from 'react-markdown';
 
@@ -59,10 +59,10 @@ export const PracticeLinkCard: React.FC<PracticeLinkCardProps> = ({ link, onRate
           <div className="flex items-center justify-between flex-wrap gap-2">
             <div className="flex items-center gap-2">
               <span className={cn(
-                "px-2.5 py-1 text-[11px] font-mono font-bold uppercase tracking-wider rounded-lg",
-                link.topic === 'python' ? "bg-blue-50 text-blue-700" : "bg-emerald-50 text-emerald-700"
+                "px-2.5 py-1 text-[11px] font-mono font-bold uppercase tracking-wider rounded-lg border",
+                getTopicBadgeClass(link.topic)
               )}>
-                {link.topic}
+                {formatTopicName(link.topic)}
               </span>
               <span className="px-2.5 py-1 text-[11px] font-mono font-medium uppercase tracking-wider bg-gray-100 text-gray-600 rounded-lg">
                 {link.subTopic || 'General'}

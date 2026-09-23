@@ -9,7 +9,7 @@ import {
   Filter, ExternalLink, Trash2, X, AlertCircle, RotateCcw, Pencil, 
   Play, Download, Upload, Target, Flame, Search, ArrowRight, BookOpen, Layers
 } from 'lucide-react';
-import { cn } from './lib/utils';
+import { cn, formatTopicName, getTopicBadgeClass } from './lib/utils';
 import { differenceInDays, differenceInCalendarDays, parseISO, format } from 'date-fns';
 
 export interface GoalSettings {
@@ -63,7 +63,8 @@ export default function App() {
   const [formData, setFormData] = useState({
     title: '',
     url: '',
-    topic: 'sql' as Topic,
+    topic: 'sql' as string,
+    customTopic: '',
     subTopic: '',
     difficulty: 'Intermediate' as Difficulty,
     personalDifficulty: 5,
@@ -100,6 +101,17 @@ export default function App() {
     };
   }, [goalSettings, links.length]);
 
+  // Dynamic list of all available topics (starter defaults + any user custom topics)
+  const availableTopics = useMemo(() => {
+    const set = new Set<string>();
+    links.forEach(l => {
+      if (l.topic) set.add(l.topic.toLowerCase().trim());
+    });
+    // Default categories
+    ['python', 'sql', 'system-design', 'qa'].forEach(t => set.add(t));
+    return ['all', ...Array.from(set)];
+  }, [links]);
+
   // Subtopics list
   const subTopics = useMemo(() => {
     const set = new Set(links.map(l => l.subTopic).filter(Boolean));
@@ -114,16 +126,17 @@ export default function App() {
   // Filtered links for table
   const filteredLinks = useMemo(() => {
     return sortedLinks.filter(item => {
-      if (activeTopic !== 'all' && item.topic !== activeTopic) return false;
+      if (activeTopic !== 'all' && item.topic.toLowerCase().trim() !== activeTopic.toLowerCase().trim()) return false;
       if (activeDifficulty !== 'all' && item.difficulty !== activeDifficulty) return false;
       if (activeSubTopic !== 'all' && item.subTopic !== activeSubTopic) return false;
       if (onlyDue && !isDue(item)) return false;
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
         const matchTitle = item.title.toLowerCase().includes(q);
+        const matchTopic = item.topic.toLowerCase().includes(q);
         const matchSubTopic = item.subTopic?.toLowerCase().includes(q);
         const matchNotes = item.notes?.toLowerCase().includes(q);
-        if (!matchTitle && !matchSubTopic && !matchNotes) return false;
+        if (!matchTitle && !matchTopic && !matchSubTopic && !matchNotes) return false;
       }
       return true;
     });
@@ -173,11 +186,19 @@ export default function App() {
     const totalTimeSecs = links.reduce((acc, curr) => acc + (curr.totalTimeSpent || 0), 0);
     const totalReviews = links.reduce((acc, curr) => acc + (curr.totalRepetitions || 0), 0);
 
-    const pythonCount = links.filter(l => l.topic === 'python').length;
-    const sqlCount = links.filter(l => l.topic === 'sql').length;
-
-    const pythonMastered = links.filter(l => l.topic === 'python' && ((l.repetitions || 0) >= 2 || (l.interval || 0) >= 5)).length;
-    const sqlMastered = links.filter(l => l.topic === 'sql' && ((l.repetitions || 0) >= 2 || (l.interval || 0) >= 5)).length;
+    // Topic breakdown for all present topics
+    const topicKeys = Array.from(new Set(links.map(l => l.topic.toLowerCase().trim()).filter(Boolean)));
+    const topicBreakdown = topicKeys.map(tKey => {
+      const topicLinks = links.filter(l => l.topic.toLowerCase().trim() === tKey);
+      const count = topicLinks.length;
+      const mastered = topicLinks.filter(l => (l.repetitions || 0) >= 2 || (l.interval || 0) >= 5).length;
+      return {
+        topic: tKey,
+        count,
+        mastered,
+        percent: count > 0 ? Math.round((mastered / count) * 100) : 0,
+      };
+    }).sort((a, b) => b.count - a.count);
 
     return {
       total,
@@ -186,12 +207,7 @@ export default function App() {
       masteryPercent: total > 0 ? Math.round((mastered / total) * 100) : 0,
       totalHours: (totalTimeSecs / 3600).toFixed(1),
       totalReviews,
-      pythonCount,
-      sqlCount,
-      pythonMastered,
-      sqlMastered,
-      pythonPercent: pythonCount > 0 ? Math.round((pythonMastered / pythonCount) * 100) : 0,
-      sqlPercent: sqlCount > 0 ? Math.round((sqlMastered / sqlCount) * 100) : 0,
+      topicBreakdown,
     };
   }, [links, dueItems]);
 
@@ -237,6 +253,7 @@ export default function App() {
       title: '',
       url: '',
       topic: 'sql',
+      customTopic: '',
       subTopic: '',
       difficulty: 'Intermediate',
       personalDifficulty: 5,
@@ -250,10 +267,13 @@ export default function App() {
   // Open edit modal
   const handleOpenEdit = (item: PracticeLink) => {
     setEditingId(item.id);
+    const standardTopics = ['sql', 'python', 'system-design', 'qa', 'algorithms', 'data-engineering'];
+    const isStandard = standardTopics.includes(item.topic.toLowerCase().trim());
     setFormData({
       title: item.title,
       url: item.url || '',
-      topic: item.topic,
+      topic: isStandard ? item.topic.toLowerCase().trim() : '__custom__',
+      customTopic: isStandard ? '' : item.topic,
       subTopic: item.subTopic || '',
       difficulty: item.difficulty,
       personalDifficulty: item.personalDifficulty || 5,
@@ -272,6 +292,10 @@ export default function App() {
       return;
     }
 
+    const effectiveTopic = formData.topic === '__custom__'
+      ? (formData.customTopic.trim() || 'General')
+      : formData.topic;
+
     const now = getNowInTZ();
     const nowIso = now.toISOString();
 
@@ -282,7 +306,7 @@ export default function App() {
             ...item,
             title: formData.title,
             url: formData.url,
-            topic: formData.topic,
+            topic: effectiveTopic,
             subTopic: formData.subTopic || 'General',
             difficulty: formData.difficulty,
             personalDifficulty: formData.personalDifficulty,
@@ -304,7 +328,7 @@ export default function App() {
         uid: 'guest_user',
         title: formData.title,
         url: formData.url,
-        topic: formData.topic,
+        topic: effectiveTopic,
         subTopic: formData.subTopic || 'General',
         difficulty: formData.difficulty,
         personalDifficulty: formData.personalDifficulty,
@@ -582,10 +606,10 @@ export default function App() {
                 <div>
                   <div className="flex items-center gap-2 mb-1 flex-wrap">
                     <span className={cn(
-                      "px-2 py-0.5 text-[10px] font-mono font-bold uppercase rounded",
-                      topRecommendation.item.topic === 'python' ? "bg-blue-50 text-blue-700" : "bg-emerald-50 text-emerald-700"
+                      "px-2 py-0.5 text-[10px] font-mono font-bold uppercase rounded border",
+                      getTopicBadgeClass(topRecommendation.item.topic)
                     )}>
-                      {topRecommendation.item.topic}
+                      {formatTopicName(topRecommendation.item.topic)}
                     </span>
                     <span className="text-xs font-mono text-gray-400">
                       {topRecommendation.item.subTopic || 'General'}
@@ -682,55 +706,42 @@ export default function App() {
           </div>
         </div>
 
-        {/* Topic Breakdown Bars (Python & SQL) */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <span className="px-2.5 py-1 bg-blue-50 text-blue-700 rounded-lg text-xs font-mono font-bold uppercase">
-                  Python
-                </span>
-                <span className="text-xs text-gray-400 font-mono">
-                  {stats.pythonMastered} / {stats.pythonCount} Mastered
-                </span>
+        {/* Dynamic Topic Mastery Cards */}
+        {stats.topicBreakdown && stats.topicBreakdown.length > 0 && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {stats.topicBreakdown.slice(0, 4).map(tb => (
+              <div key={tb.topic} className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className={cn(
+                      "px-2 py-0.5 rounded text-[11px] font-mono font-bold uppercase border",
+                      getTopicBadgeClass(tb.topic)
+                    )}>
+                      {formatTopicName(tb.topic)}
+                    </span>
+                    <span className="text-[11px] text-gray-400 font-mono">
+                      {tb.mastered} / {tb.count}
+                    </span>
+                  </div>
+                  <span className="text-xs font-mono font-bold text-gray-800">{tb.percent}%</span>
+                </div>
+                <div className="w-full h-2 bg-gray-100 rounded-full overflow-hidden">
+                  <div 
+                    className="h-full bg-gray-900 rounded-full transition-all duration-500" 
+                    style={{ width: `${tb.percent}%` }} 
+                  />
+                </div>
               </div>
-              <span className="text-sm font-mono font-bold text-blue-700">{stats.pythonPercent}%</span>
-            </div>
-            <div className="w-full h-2.5 bg-gray-100 rounded-full overflow-hidden">
-              <div 
-                className="h-full bg-blue-600 rounded-full transition-all duration-500" 
-                style={{ width: `${stats.pythonPercent}%` }} 
-              />
-            </div>
+            ))}
           </div>
-
-          <div className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <span className="px-2.5 py-1 bg-emerald-50 text-emerald-700 rounded-lg text-xs font-mono font-bold uppercase">
-                  SQL
-                </span>
-                <span className="text-xs text-gray-400 font-mono">
-                  {stats.sqlMastered} / {stats.sqlCount} Mastered
-                </span>
-              </div>
-              <span className="text-sm font-mono font-bold text-emerald-700">{stats.sqlPercent}%</span>
-            </div>
-            <div className="w-full h-2.5 bg-gray-100 rounded-full overflow-hidden">
-              <div 
-                className="h-full bg-emerald-600 rounded-full transition-all duration-500" 
-                style={{ width: `${stats.sqlPercent}%` }} 
-              />
-            </div>
-          </div>
-        </div>
+        )}
 
         {/* Filters and Search Bar */}
         <div className="bg-white p-4 sm:p-5 rounded-3xl border border-gray-100 shadow-sm flex flex-wrap gap-4 items-center justify-between">
           <div className="flex flex-wrap gap-2 items-center">
             {/* Topic Filter Buttons */}
-            <div className="flex gap-1 bg-gray-50 p-1 rounded-2xl border border-gray-100">
-              {(['all', 'python', 'sql'] as const).map(t => (
+            <div className="flex flex-wrap gap-1 bg-gray-50 p-1 rounded-2xl border border-gray-100">
+              {availableTopics.map(t => (
                 <button
                   key={t}
                   onClick={() => setActiveTopic(t)}
@@ -739,7 +750,7 @@ export default function App() {
                     activeTopic === t ? "bg-gray-900 text-white shadow-sm" : "text-gray-500 hover:text-gray-900"
                   )}
                 >
-                  {t}
+                  {t === 'all' ? 'All' : formatTopicName(t)}
                 </button>
               ))}
             </div>
@@ -893,10 +904,10 @@ export default function App() {
                         <td className="px-6 py-4">
                           <div className="flex flex-col gap-1">
                             <span className={cn(
-                              "px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase tracking-wider w-fit",
-                              item.topic === 'python' ? "bg-blue-50 text-blue-700" : "bg-emerald-50 text-emerald-700"
+                              "px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase tracking-wider w-fit border",
+                              getTopicBadgeClass(item.topic)
                             )}>
-                              {item.topic}
+                              {formatTopicName(item.topic)}
                             </span>
                             <span className="text-[11px] font-mono text-gray-500 truncate max-w-[140px]">
                               {item.subTopic || 'General'}
@@ -1022,15 +1033,20 @@ export default function App() {
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <label className="block text-xs font-mono uppercase tracking-wider text-gray-500 mb-1.5">
-                      Topic *
+                      Problem Type / Topic *
                     </label>
                     <select
                       value={formData.topic}
-                      onChange={e => setFormData({ ...formData, topic: e.target.value as Topic })}
+                      onChange={e => setFormData({ ...formData, topic: e.target.value })}
                       className="w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-gray-900"
                     >
                       <option value="sql">SQL</option>
                       <option value="python">Python</option>
+                      <option value="system-design">System Design</option>
+                      <option value="qa">Q&A / Conceptual</option>
+                      <option value="algorithms">Algorithms & Data Structures</option>
+                      <option value="data-engineering">Data Engineering</option>
+                      <option value="__custom__">+ Custom Category...</option>
                     </select>
                   </div>
 
@@ -1049,6 +1065,22 @@ export default function App() {
                     </select>
                   </div>
                 </div>
+
+                {formData.topic === '__custom__' && (
+                  <div>
+                    <label className="block text-xs font-mono uppercase tracking-wider text-gray-500 mb-1.5">
+                      Custom Category Name *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g., Behavioral, ML System Design, Spark, etc."
+                      value={formData.customTopic}
+                      onChange={e => setFormData({ ...formData, customTopic: e.target.value })}
+                      className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-gray-900"
+                    />
+                  </div>
+                )}
 
                 <div className="grid grid-cols-2 gap-4">
                   <div>
