@@ -1,1072 +1,979 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { onAuthStateChanged, auth, db, signOut } from './firebase';
-import { collection, query, where, onSnapshot, doc, setDoc, updateDoc, deleteDoc } from 'firebase/firestore';
-import { User } from 'firebase/auth';
-import { PracticeLink, Topic, Difficulty, Submission } from './types';
-import { updateCardSRS, isDue, calculatePriorityScore, getNowInTZ, formatDateInTZ, parseDateInTZ, TIMEZONE } from './lib/srs';
-import { format, differenceInHours, addDays, startOfDay } from 'date-fns';
-import { toZonedTime } from 'date-fns-tz';
-import { gradeSubmission } from './services/geminiService';
-import { Auth } from './components/Auth';
+import { PracticeLink, Topic, Difficulty } from './types';
+import { updateCardSRS, isDue, calculatePriorityScore, getNowInTZ, formatDateInTZ, parseDateInTZ } from './lib/srs';
 import { PracticeLinkCard } from './components/PracticeLinkCard';
-import { AudioRecorder } from './components/AudioRecorder';
+import { getInitialProblems, saveLocalProblems, resetToStarterProblems, exportProblemsJSON, importProblemsJSON } from './lib/storage';
 import { motion, AnimatePresence } from 'motion/react';
-import { LogOut, Plus, Sparkles, Database, Code2, CheckCircle2, ChevronRight, BarChart3, Clock, Filter, ExternalLink, Trash2, X, AlertCircle, RotateCcw, Pencil, Play, Mic2, History, Star } from 'lucide-react';
+import { 
+  Plus, Sparkles, Database, Code2, CheckCircle2, BarChart3, Clock, 
+  Filter, ExternalLink, Trash2, X, AlertCircle, RotateCcw, Pencil, 
+  Play, Download, Upload, Target, Flame, Search, ArrowRight, BookOpen, Layers
+} from 'lucide-react';
 import { cn } from './lib/utils';
-import Markdown from 'react-markdown';
-
-enum OperationType {
-  CREATE = 'create',
-  UPDATE = 'update',
-  DELETE = 'delete',
-  LIST = 'list',
-  GET = 'get',
-  WRITE = 'write',
-}
-
-interface FirestoreErrorInfo {
-  error: string;
-  operationType: OperationType;
-  path: string | null;
-  authInfo: {
-    userId: string | undefined;
-    email: string | null | undefined;
-    emailVerified: boolean | undefined;
-    isAnonymous: boolean | undefined;
-    tenantId: string | null | undefined;
-    providerInfo: {
-      providerId: string;
-      displayName: string | null;
-      email: string | null;
-      photoUrl: string | null;
-    }[];
-  }
-}
-
-function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
-  const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
-    authInfo: {
-      userId: auth.currentUser?.uid,
-      email: auth.currentUser?.email,
-      emailVerified: auth.currentUser?.emailVerified,
-      isAnonymous: auth.currentUser?.isAnonymous,
-      tenantId: auth.currentUser?.tenantId,
-      providerInfo: auth.currentUser?.providerData.map(provider => ({
-        providerId: provider.providerId,
-        displayName: provider.displayName,
-        email: provider.email,
-        photoUrl: provider.photoURL
-      })) || []
-    },
-    operationType,
-    path
-  }
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
-  return new Error(JSON.stringify(errInfo));
-}
+import { differenceInDays, differenceInCalendarDays, parseISO } from 'date-fns';
 
 export default function App() {
-  const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [links, setLinks] = useState<PracticeLink[]>([]);
+  const [links, setLinks] = useState<PracticeLink[]>(() => getInitialProblems());
   const [activeTopic, setActiveTopic] = useState<Topic | 'all'>('all');
   const [activeDifficulty, setActiveDifficulty] = useState<Difficulty | 'all'>('all');
   const [activeSubTopic, setActiveSubTopic] = useState<string | 'all'>('all');
-  const [isAdding, setIsAdding] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [onlyDue, setOnlyDue] = useState(false);
+
+  // Practice session state
+  const [isPracticing, setIsPracticing] = useState(false);
+  const [currentPracticeItem, setCurrentPracticeItem] = useState<PracticeLink | null>(null);
+  const [sessionSuccessMessage, setSessionSuccessMessage] = useState<string | null>(null);
+
+  // Modals state
+  const [isFormOpen, setIsFormOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [sessionComplete, setSessionComplete] = useState(false);
-  const [isReviewing, setIsReviewing] = useState(false);
-  const [selectedPracticeLink, setSelectedPracticeLink] = useState<PracticeLink | null>(null);
+  const [isBackupModalOpen, setIsBackupModalOpen] = useState(false);
+  const [backupJsonText, setBackupJsonText] = useState('');
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'tutoring'>('dashboard');
-  const [submissions, setSubmissions] = useState<Submission[]>([]);
-  const [isSubmittingAudio, setIsSubmittingAudio] = useState(false);
-  const [selectedSubmission, setSelectedSubmission] = useState<Submission | null>(null);
-  
-  // New Link Form State
-  const [newLink, setNewLink] = useState({
-    url: '',
+
+  // Form State
+  const [formData, setFormData] = useState({
     title: '',
-    topic: 'python' as Topic,
+    url: '',
+    topic: 'sql' as Topic,
     subTopic: '',
-    difficulty: 'Beginner' as Difficulty,
+    difficulty: 'Intermediate' as Difficulty,
+    personalDifficulty: 5,
     notes: '',
-    transcript: '',
     questionContent: '',
     solutionContent: '',
-    initialTimeMins: '0',
-    initialTimeSecs: '0',
-    initialPersonalDifficulty: 5,
-    lastReviewDate: getNowInTZ().toISOString().split('T')[0],
-    totalRepetitions: 1,
-    repetitions: 1
   });
 
+  // Save changes to localStorage whenever links change
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      setLoading(false);
-    });
-    return () => unsubscribe();
-  }, []);
-
-  useEffect(() => {
-    setActiveDifficulty('all');
-    setActiveSubTopic('all');
-  }, [activeTopic]);
-
-  useEffect(() => {
-    if (!user) {
-      setLinks([]);
-      return;
-    }
-
-    const q = query(collection(db, 'practiceLinks'), where('uid', '==', user.uid));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const linkData = snapshot.docs.map(doc => {
-        const data = doc.data() as PracticeLink;
-        // RE-CALCULATE PRIORITY ON THE FLY
-        // This ensures the "Overdue" factor is always accurate to the current minute.
-        const currentScore = calculatePriorityScore({ ...data, id: doc.id });
-        return { id: doc.id, ...data, priorityScore: currentScore } as PracticeLink;
-      });
-      // Sort by priorityScore descending
-      linkData.sort((a, b) => (b.priorityScore || 0) - (a.priorityScore || 0));
-      setLinks(linkData);
-    }, (err) => {
-      handleFirestoreError(err, OperationType.GET, 'practiceLinks');
-      setError('Failed to load practice links. Please check your permissions.');
-    });
-
-    return () => unsubscribe();
-  }, [user]);
-
-  useEffect(() => {
-    if (!user) {
-      setSubmissions([]);
-      return;
-    }
-
-    const q = query(collection(db, 'submissions'), where('uid', '==', user.uid));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const subData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Submission));
-      subData.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-      setSubmissions(subData);
-    }, (err) => {
-      handleFirestoreError(err, OperationType.GET, 'submissions');
-    });
-
-    return () => unsubscribe();
-  }, [user]);
-
-  const subTopics = useMemo(() => {
-    const subs = new Set(links.map(c => c.subTopic).filter(Boolean));
-    return Array.from(subs);
+    saveLocalProblems(links);
   }, [links]);
 
-  const dueLinks = useMemo(() => {
-    return links.filter(c => {
-      const matchesTopic = activeTopic === 'all' || c.topic === activeTopic;
-      const matchesDifficulty = activeDifficulty === 'all' || c.difficulty === activeDifficulty;
-      const matchesSubTopic = activeSubTopic === 'all' || c.subTopic === activeSubTopic;
-      return matchesTopic && matchesDifficulty && matchesSubTopic && isDue(c);
-    }).sort((a, b) => (b.priorityScore || 0) - (a.priorityScore || 0));
-  }, [links, activeTopic, activeDifficulty, activeSubTopic]);
-
-  const handleAudioSubmit = async (link: PracticeLink, audioBase64: string) => {
-    if (!user) return;
-    setIsSubmittingAudio(true);
-    try {
-      const grading = await gradeSubmission(
-        audioBase64, 
-        link.title, 
-        link.notes || link.transcript || '',
-        link.questionContent,
-        link.solutionContent
-      );
-      
-      const newSubmission: Omit<Submission, 'id'> = {
-        linkId: link.id,
-        uid: user.uid,
-        audioData: audioBase64,
-        transcript: grading.transcript,
-        feedback: grading.feedback,
-        grade: grading.grade,
-        status: 'graded',
-        createdAt: getNowInTZ().toISOString()
-      };
-
-      await setDoc(doc(collection(db, 'submissions')), newSubmission);
-      alert('Explanation submitted and graded successfully!');
-      setActiveTab('tutoring');
-    } catch (err) {
-      console.error('Failed to submit audio:', err);
-      setError('Failed to grade audio submission.');
-    } finally {
-      setIsSubmittingAudio(false);
+  // May 15 Deadline Calculation
+  const deadlineInfo = useMemo(() => {
+    const now = getNowInTZ();
+    const currentYear = now.getFullYear();
+    // Deadline: May 15 of current year, or next year if May 15 has already passed
+    let deadline = new Date(currentYear, 4, 15, 23, 59, 59);
+    if (now > deadline) {
+      deadline = new Date(currentYear + 1, 4, 15, 23, 59, 59);
     }
-  };
+    const daysRemaining = Math.max(0, differenceInCalendarDays(deadline, now));
+    return {
+      deadlineDate: deadline,
+      daysRemaining,
+    };
+  }, []);
 
-  const handleStartPractice = async (link: PracticeLink) => {
-    setSelectedPracticeLink(link);
-    setIsReviewing(true);
+  // Subtopics list
+  const subTopics = useMemo(() => {
+    const set = new Set(links.map(l => l.subTopic).filter(Boolean));
+    return Array.from(set);
+  }, [links]);
+
+  // Priority sorted items
+  const sortedLinks = useMemo(() => {
+    return [...links].sort((a, b) => (b.priorityScore || 0) - (a.priorityScore || 0));
+  }, [links]);
+
+  // Filtered links for table
+  const filteredLinks = useMemo(() => {
+    return sortedLinks.filter(item => {
+      if (activeTopic !== 'all' && item.topic !== activeTopic) return false;
+      if (activeDifficulty !== 'all' && item.difficulty !== activeDifficulty) return false;
+      if (activeSubTopic !== 'all' && item.subTopic !== activeSubTopic) return false;
+      if (onlyDue && !isDue(item)) return false;
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase();
+        const matchTitle = item.title.toLowerCase().includes(q);
+        const matchSubTopic = item.subTopic?.toLowerCase().includes(q);
+        const matchNotes = item.notes?.toLowerCase().includes(q);
+        if (!matchTitle && !matchSubTopic && !matchNotes) return false;
+      }
+      return true;
+    });
+  }, [sortedLinks, activeTopic, activeDifficulty, activeSubTopic, onlyDue, searchQuery]);
+
+  // Due items list
+  const dueItems = useMemo(() => {
+    return sortedLinks.filter(isDue);
+  }, [sortedLinks]);
+
+  // Recommendation engine: Pick the top item needing attention
+  const topRecommendation = useMemo(() => {
+    if (links.length === 0) return null;
     
-    // Update lastReviewDate when the practice panel is opened
-    try {
-      const now = getNowInTZ();
-      const nowIso = now.toISOString();
-      const updates: any = {
-        lastReviewDate: nowIso
+    // First priority: highest priority due item
+    if (dueItems.length > 0) {
+      const topDue = dueItems[0];
+      return {
+        item: topDue,
+        reason: topDue.totalRepetitions === 0 
+          ? 'New problem — ready for your initial practice!' 
+          : 'Spaced review is due to retain this concept long-term.'
       };
+    }
 
-      // If next review is in the past or earlier than now, 
-      // move it to tomorrow to ensure Next Review >= Last Practice
-      // and to respect the "just practiced" state.
-      const nextReview = new Date(link.nextReviewDate);
-      if (nextReview < now) {
-        updates.nextReviewDate = addDays(startOfDay(now), 1).toISOString();
-        // Also ensure interval is at least 1 if we're pushing it to tomorrow
-        if ((link.interval || 0) < 1) {
-          updates.interval = 1;
-        }
+    // Second: items never practiced
+    const unpracticed = sortedLinks.find(l => (l.totalRepetitions || 0) === 0);
+    if (unpracticed) {
+      return {
+        item: unpracticed,
+        reason: 'Recommended new topic to expand your interview syllabus.'
+      };
+    }
+
+    // Fallback: highest priority item overall
+    return {
+      item: sortedLinks[0],
+      reason: 'Recommended for extra reinforcement.'
+    };
+  }, [links, dueItems, sortedLinks]);
+
+  // Progress stats
+  const stats = useMemo(() => {
+    const total = links.length;
+    const dueCount = dueItems.length;
+    const mastered = links.filter(l => (l.repetitions || 0) >= 2 || (l.interval || 0) >= 5).length;
+    const totalTimeSecs = links.reduce((acc, curr) => acc + (curr.totalTimeSpent || 0), 0);
+    const totalReviews = links.reduce((acc, curr) => acc + (curr.totalRepetitions || 0), 0);
+
+    const pythonCount = links.filter(l => l.topic === 'python').length;
+    const sqlCount = links.filter(l => l.topic === 'sql').length;
+
+    const pythonMastered = links.filter(l => l.topic === 'python' && ((l.repetitions || 0) >= 2 || (l.interval || 0) >= 5)).length;
+    const sqlMastered = links.filter(l => l.topic === 'sql' && ((l.repetitions || 0) >= 2 || (l.interval || 0) >= 5)).length;
+
+    return {
+      total,
+      dueCount,
+      mastered,
+      masteryPercent: total > 0 ? Math.round((mastered / total) * 100) : 0,
+      totalHours: (totalTimeSecs / 3600).toFixed(1),
+      totalReviews,
+      pythonCount,
+      sqlCount,
+      pythonMastered,
+      sqlMastered,
+      pythonPercent: pythonCount > 0 ? Math.round((pythonMastered / pythonCount) * 100) : 0,
+      sqlPercent: sqlCount > 0 ? Math.round((sqlMastered / sqlCount) * 100) : 0,
+    };
+  }, [links, dueItems]);
+
+  // Start practice session
+  const handleStartPractice = (item: PracticeLink) => {
+    setCurrentPracticeItem(item);
+    setIsPracticing(true);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  // Complete rating
+  const handleRatePractice = (quality: number, solveTime: number, personalDifficulty: number) => {
+    if (!currentPracticeItem) return;
+
+    const updates = updateCardSRS(currentPracticeItem, quality, solveTime, personalDifficulty);
+    setLinks(prev => prev.map(l => {
+      if (l.id === currentPracticeItem.id) {
+        return {
+          ...l,
+          ...updates,
+        } as PracticeLink;
       }
+      return l;
+    }));
 
-      await updateDoc(doc(db, 'practiceLinks', link.id), updates);
-    } catch (err) {
-      console.error('Failed to update last practice time:', err);
+    setSessionSuccessMessage(`Saved! Quality ${quality}/5 logged. Next review in ${updates.interval || 1} day(s).`);
+    setTimeout(() => setSessionSuccessMessage(null), 4000);
+
+    // If there are other due items, offer the next one or close
+    const remainingDue = dueItems.filter(d => d.id !== currentPracticeItem.id);
+    if (remainingDue.length > 0) {
+      setCurrentPracticeItem(remainingDue[0]);
+    } else {
+      setIsPracticing(false);
+      setCurrentPracticeItem(null);
     }
   };
 
-  const handleRate = async (link: PracticeLink, quality: number, solveTime: number, personalDifficulty: number) => {
-    const updates = updateCardSRS(link, quality, solveTime, personalDifficulty);
-    try {
-      await updateDoc(doc(db, 'practiceLinks', link.id), updates);
-      
-      if (selectedPracticeLink) {
-        setSelectedPracticeLink(null);
-        setIsReviewing(false);
-      } else if (dueLinks.length === 1) {
-        setSessionComplete(true);
-        setIsReviewing(false);
-      }
-    } catch (err) {
-      const wrappedError = handleFirestoreError(err, OperationType.UPDATE, `practiceLinks/${link.id}`);
-      setError('Failed to update practice link. ' + (err instanceof Error && err.message.includes('permission') ? 'Insufficient permissions.' : ''));
-      console.error('Update failed:', wrappedError);
-    }
+  // Open add modal
+  const handleOpenAdd = () => {
+    setEditingId(null);
+    setFormData({
+      title: '',
+      url: '',
+      topic: 'sql',
+      subTopic: '',
+      difficulty: 'Intermediate',
+      personalDifficulty: 5,
+      notes: '',
+      questionContent: '',
+      solutionContent: '',
+    });
+    setIsFormOpen(true);
   };
 
-  const handleAddLink = async (e: React.FormEvent) => {
+  // Open edit modal
+  const handleOpenEdit = (item: PracticeLink) => {
+    setEditingId(item.id);
+    setFormData({
+      title: item.title,
+      url: item.url || '',
+      topic: item.topic,
+      subTopic: item.subTopic || '',
+      difficulty: item.difficulty,
+      personalDifficulty: item.personalDifficulty || 5,
+      notes: item.notes || '',
+      questionContent: item.questionContent || '',
+      solutionContent: item.solutionContent || '',
+    });
+    setIsFormOpen(true);
+  };
+
+  // Save form (Add or Edit)
+  const handleSaveForm = (e: React.FormEvent) => {
     e.preventDefault();
-    setError(null);
-    if (!user || !newLink.url || !newLink.title) return;
-    
-    const id = editingId || Math.random().toString(36).substring(2, 15);
-    const initialSeconds = (parseInt(newLink.initialTimeMins) || 0) * 60 + (parseInt(newLink.initialTimeSecs) || 0);
-    
-    // Create a temporary card to calculate initial priority score
+    if (!formData.title.trim()) {
+      setError('Please provide a problem title.');
+      return;
+    }
+
     const now = getNowInTZ();
     const nowIso = now.toISOString();
-    const lastPracticeDate = parseDateInTZ(newLink.lastReviewDate);
-    const lastPracticeDateObj = toZonedTime(new Date(lastPracticeDate), TIMEZONE);
-    
-    // If last practice was today or in the future (relative to now), set next review to tomorrow
-    // Otherwise, if it was in the past, it might be due now.
-    const isPracticedRecently = differenceInHours(now, lastPracticeDateObj) < 16;
-    const nextReviewDate = isPracticedRecently 
-      ? addDays(startOfDay(now), 1).toISOString() 
-      : nowIso;
 
-    const tempCard: any = {
-      difficulty: newLink.difficulty,
-      averageSolveTime: initialSeconds,
-      personalDifficulty: newLink.initialPersonalDifficulty,
-      totalRepetitions: 1, // Automatically count as 1 when adding
-      createdAt: nowIso,
-      lastReviewDate: lastPracticeDate
-    };
-    const priorityScore = calculatePriorityScore(tempCard);
-
-    try {
-      const linkData: any = {
-        id,
-        uid: user.uid,
-        url: newLink.url,
-        title: newLink.title,
-        topic: newLink.topic,
-        subTopic: newLink.subTopic,
-        difficulty: newLink.difficulty,
-        notes: newLink.notes,
-        transcript: newLink.transcript,
-        questionContent: newLink.questionContent,
-        solutionContent: newLink.solutionContent,
-        personalDifficulty: newLink.initialPersonalDifficulty,
-        lastReviewDate: lastPracticeDate,
-        totalRepetitions: Number(newLink.totalRepetitions) || 0, // Allow 0
-        repetitions: Number(newLink.repetitions) || 0, // Allow 0
-        priorityScore
+    if (editingId) {
+      setLinks(prev => prev.map(item => {
+        if (item.id === editingId) {
+          const updated: PracticeLink = {
+            ...item,
+            title: formData.title,
+            url: formData.url,
+            topic: formData.topic,
+            subTopic: formData.subTopic || 'General',
+            difficulty: formData.difficulty,
+            personalDifficulty: formData.personalDifficulty,
+            notes: formData.notes,
+            questionContent: formData.questionContent,
+            solutionContent: formData.solutionContent,
+          };
+          return {
+            ...updated,
+            priorityScore: calculatePriorityScore(updated)
+          };
+        }
+        return item;
+      }));
+    } else {
+      const newId = `prob-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+      const newItem: PracticeLink = {
+        id: newId,
+        uid: 'guest_user',
+        title: formData.title,
+        url: formData.url,
+        topic: formData.topic,
+        subTopic: formData.subTopic || 'General',
+        difficulty: formData.difficulty,
+        personalDifficulty: formData.personalDifficulty,
+        notes: formData.notes,
+        questionContent: formData.questionContent,
+        solutionContent: formData.solutionContent,
+        repetitions: 0,
+        interval: 0,
+        easinessFactor: 2.5,
+        nextReviewDate: nowIso,
+        totalTimeSpent: 0,
+        lastSolveTime: 0,
+        averageSolveTime: 0,
+        totalRepetitions: 0,
+        priorityScore: 0,
+        createdAt: nowIso,
       };
+      newItem.priorityScore = calculatePriorityScore(newItem);
+      setLinks(prev => [newItem, ...prev]);
+    }
 
-      if (editingId) {
-        // When editing, we update the core fields and the last review date (which affects priority)
-        // We also recalculate nextReviewDate if they changed the last practice date to today
-        await updateDoc(doc(db, 'practiceLinks', id), {
-          ...linkData,
-          nextReviewDate
-        });
-      } else {
-        // When adding new, initialize SRS fields
-        await setDoc(doc(db, 'practiceLinks', id), {
-          ...linkData,
-          repetitions: Number(newLink.repetitions) || 0,
-          interval: isPracticedRecently ? 1 : 0,
-          easinessFactor: 2.5,
-          nextReviewDate,
-          createdAt: nowIso,
-          totalTimeSpent: initialSeconds,
-          lastSolveTime: initialSeconds,
-          averageSolveTime: initialSeconds,
-          totalRepetitions: Number(newLink.totalRepetitions) || 0,
-        });
+    setIsFormOpen(false);
+    setEditingId(null);
+  };
+
+  // Delete problem
+  const handleDeleteItem = (id: string, title: string) => {
+    if (confirm(`Delete "${title}"?`)) {
+      setLinks(prev => prev.filter(l => l.id !== id));
+      if (currentPracticeItem?.id === id) {
+        setIsPracticing(false);
+        setCurrentPracticeItem(null);
       }
-
-      setNewLink({
-        url: '',
-        title: '',
-        topic: 'python',
-        subTopic: '',
-        difficulty: 'Beginner',
-        notes: '',
-        transcript: '',
-        questionContent: '',
-        solutionContent: '',
-        initialTimeMins: '0',
-        initialTimeSecs: '0',
-        initialPersonalDifficulty: 5,
-        lastReviewDate: getNowInTZ().toISOString().split('T')[0],
-        totalRepetitions: 1,
-        repetitions: 1
-      });
-      setIsAdding(false);
-      setEditingId(null);
-    } catch (err) {
-      const wrappedError = handleFirestoreError(err, editingId ? OperationType.UPDATE : OperationType.CREATE, `practiceLinks/${id}`);
-      setError(`Failed to ${editingId ? 'update' : 'add'} practice link. ` + (err instanceof Error && err.message.includes('permission') ? 'Insufficient permissions. Please ensure all fields are valid.' : ''));
-      console.error(`${editingId ? 'Update' : 'Add'} failed:`, wrappedError);
     }
   };
 
-  const handleEditClick = (link: PracticeLink) => {
-    setNewLink({
-      url: link.url || '',
-      title: link.title,
-      topic: link.topic,
-      subTopic: link.subTopic,
-      difficulty: link.difficulty,
-      notes: link.notes || '',
-      transcript: link.transcript || '',
-      questionContent: link.questionContent || '',
-      solutionContent: link.solutionContent || '',
-      initialTimeMins: Math.floor((link.lastSolveTime || 0) / 60).toString(),
-      initialTimeSecs: ((link.lastSolveTime || 0) % 60).toString(),
-      initialPersonalDifficulty: link.personalDifficulty || 5,
-      lastReviewDate: link.lastReviewDate ? formatDateInTZ(link.lastReviewDate, 'yyyy-MM-dd') : getNowInTZ().toISOString().split('T')[0],
-      totalRepetitions: link.totalRepetitions || 0,
-      repetitions: link.repetitions || 0
-    });
-    setEditingId(link.id);
-    setIsAdding(true);
+  // Reset to starter problems
+  const handleResetToStarters = () => {
+    if (confirm('Reset your collection to the curated SQL & Python starter set? Any custom problems will be overwritten unless exported.')) {
+      const starters = resetToStarterProblems();
+      setLinks(starters);
+      setIsPracticing(false);
+      setCurrentPracticeItem(null);
+    }
   };
 
-  const handleDelete = async (id: string) => {
-    if (!confirm('Are you sure you want to delete this link?')) return;
+  // Export data
+  const handleExportData = () => {
+    const jsonStr = exportProblemsJSON(links);
+    const blob = new Blob([jsonStr], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `coderecall_interview_practice_${formatDateInTZ(new Date(), 'yyyy-MM-dd')}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // Open import modal
+  const handleOpenImport = () => {
+    setBackupJsonText('');
+    setIsBackupModalOpen(true);
+  };
+
+  // Import JSON data
+  const handleConfirmImport = () => {
     try {
-      await deleteDoc(doc(db, 'practiceLinks', id));
+      const imported = importProblemsJSON(backupJsonText);
+      setLinks(imported);
+      setIsBackupModalOpen(false);
+      alert(`Successfully loaded ${imported.length} problems!`);
     } catch (err) {
-      const wrappedError = handleFirestoreError(err, OperationType.DELETE, `practiceLinks/${id}`);
-      setError('Failed to delete practice link.');
-      console.error('Delete failed:', wrappedError);
+      alert(`Import failed: ${err instanceof Error ? err.message : 'Invalid JSON format'}`);
     }
   };
-
-  const handleResetAllToToday = async () => {
-    const now = getNowInTZ();
-    const todayStr = format(now, 'MMM d');
-    if (!confirm(`This will set the Last Practice date for ALL problems to today (${todayStr}). Continue?`)) return;
-    
-    const today = now.toISOString();
-    const tomorrow = addDays(startOfDay(now), 1).toISOString();
-
-    const batchPromises = links.map(link => {
-      const tempCard = { 
-        ...link, 
-        lastReviewDate: today, 
-        nextReviewDate: tomorrow,
-        totalRepetitions: (link.totalRepetitions || 0) + 1,
-        repetitions: 1
-      };
-      const newPriority = calculatePriorityScore(tempCard);
-      return updateDoc(doc(db, 'practiceLinks', link.id), {
-        lastReviewDate: today,
-        nextReviewDate: tomorrow,
-        interval: 1,
-        repetitions: 1,
-        totalRepetitions: (link.totalRepetitions || 0) + 1,
-        priorityScore: newPriority
-      });
-    });
-
-    try {
-      await Promise.all(batchPromises);
-      alert('All problems updated to today!');
-    } catch (err) {
-      console.error('Bulk update failed:', err);
-      setError('Failed to update all problems.');
-    }
-  };
-
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-[#F5F5F0] flex items-center justify-center">
-        <motion.div 
-          animate={{ rotate: 360 }}
-          transition={{ repeat: Infinity, duration: 1, ease: "linear" }}
-          className="w-8 h-8 border-4 border-gray-900 border-t-transparent rounded-full"
-        />
-      </div>
-    );
-  }
-
-  if (!user) return <Auth />;
 
   return (
-    <div className="min-h-screen bg-[#F5F5F0] text-gray-900 font-sans selection:bg-blue-100">
-      {/* Header */}
-      <header className="fixed top-0 left-0 right-0 h-16 bg-white/80 backdrop-blur-md border-b border-gray-100 z-50 px-6 flex items-center justify-between">
-        <div className="flex items-center gap-6">
+    <div className="min-h-screen bg-[#F8F9FA] text-gray-900 font-sans selection:bg-blue-100">
+      {/* Navigation Header */}
+      <header className="sticky top-0 z-40 bg-white/90 backdrop-blur-md border-b border-gray-100 px-6 py-4">
+        <div className="max-w-7xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 bg-gray-900 rounded-lg flex items-center justify-center text-white">
-              <Sparkles className="w-4 h-4" />
+            <div className="w-10 h-10 bg-gray-900 rounded-2xl flex items-center justify-center text-white shadow-sm">
+              <Code2 className="w-5 h-5 text-white" />
             </div>
-            <span className="font-serif font-medium text-lg tracking-tight">CodeRecall</span>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="font-serif font-bold text-xl tracking-tight text-gray-900">CodeRecall</span>
+                <span className="px-2 py-0.5 bg-blue-50 text-blue-700 rounded-full text-[10px] font-mono font-bold uppercase tracking-wider">
+                  Python & SQL Tracker
+                </span>
+              </div>
+              <p className="text-xs text-gray-500 hidden sm:block">
+                Spaced Repetition & Recommendation Engine
+              </p>
+            </div>
           </div>
-          <nav className="hidden md:flex items-center gap-6 ml-4">
-            <button 
-              onClick={() => setActiveTab('dashboard')}
-              className={cn(
-                "text-sm font-medium transition-all",
-                activeTab === 'dashboard' ? "text-gray-900" : "text-gray-400 hover:text-gray-600"
-              )}
+
+          <div className="flex items-center gap-2 sm:gap-3">
+            <button
+              onClick={handleExportData}
+              title="Export JSON Backup"
+              className="p-2 sm:px-3 sm:py-2 border border-gray-200 rounded-xl text-xs font-mono text-gray-600 hover:bg-gray-50 hover:border-gray-300 transition-all flex items-center gap-1.5"
             >
-              Dashboard
+              <Download className="w-4 h-4 text-gray-500" />
+              <span className="hidden sm:inline">Export</span>
             </button>
-            <button 
-              onClick={() => setActiveTab('tutoring')}
-              className={cn(
-                "text-sm font-medium transition-all flex items-center gap-2",
-                activeTab === 'tutoring' ? "text-gray-900" : "text-gray-400 hover:text-gray-600"
-              )}
+            <button
+              onClick={handleOpenImport}
+              title="Import JSON Backup"
+              className="p-2 sm:px-3 sm:py-2 border border-gray-200 rounded-xl text-xs font-mono text-gray-600 hover:bg-gray-50 hover:border-gray-300 transition-all flex items-center gap-1.5"
             >
-              <Mic2 className="w-4 h-4" />
-              Tutoring
+              <Upload className="w-4 h-4 text-gray-500" />
+              <span className="hidden sm:inline">Import</span>
             </button>
-          </nav>
-        </div>
-        
-        <div className="flex items-center gap-4">
-          <div className="hidden md:flex items-center gap-1 px-3 py-1 bg-gray-100 rounded-full text-[10px] font-mono font-medium text-gray-500 uppercase tracking-wider">
-            <Clock className="w-3 h-3" />
-            {dueLinks.length} Due
+            <button
+              onClick={handleOpenAdd}
+              className="px-4 py-2.5 bg-gray-900 text-white rounded-xl text-xs font-medium hover:bg-black transition-all flex items-center gap-2 shadow-sm"
+            >
+              <Plus className="w-4 h-4" />
+              <span>Add Problem</span>
+            </button>
           </div>
-          <button 
-            onClick={() => signOut(auth)}
-            className="p-2 hover:bg-gray-100 rounded-full transition-colors text-gray-500"
-          >
-            <LogOut className="w-5 h-5" />
-          </button>
         </div>
       </header>
 
-      <main className="pt-24 pb-12 px-6 max-w-[1600px] mx-auto">
+      {/* Main Container */}
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 py-8 space-y-8">
+        
+        {/* Success Alert Banner */}
         <AnimatePresence>
-          {error && (
+          {sessionSuccessMessage && (
             <motion.div
-              initial={{ opacity: 0, y: -20 }}
+              initial={{ opacity: 0, y: -10 }}
               animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -20 }}
-              className="mb-6 p-4 bg-red-50 border border-red-100 rounded-2xl flex items-center gap-3 text-red-600 text-sm"
+              exit={{ opacity: 0, y: -10 }}
+              className="p-4 bg-emerald-50 border border-emerald-200 rounded-2xl flex items-center justify-between text-emerald-800 text-sm shadow-sm"
             >
-              <AlertCircle className="w-5 h-5 flex-shrink-0" />
-              <p className="flex-grow">{error}</p>
-              <button onClick={() => setError(null)} className="p-1 hover:bg-red-100 rounded-lg transition-colors">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="w-5 h-5 text-emerald-600 flex-shrink-0" />
+                <span>{sessionSuccessMessage}</span>
+              </div>
+              <button onClick={() => setSessionSuccessMessage(null)} className="p-1 text-emerald-600 hover:bg-emerald-100 rounded-lg">
                 <X className="w-4 h-4" />
               </button>
             </motion.div>
           )}
         </AnimatePresence>
 
-        <AnimatePresence mode="wait">
-          {sessionComplete ? (
-            <motion.div 
-              key="complete"
-              initial={{ opacity: 0, scale: 0.95 }}
+        {/* Active Practice Card Modal / View */}
+        <AnimatePresence>
+          {isPracticing && currentPracticeItem && (
+            <motion.div
+              initial={{ opacity: 0, scale: 0.98 }}
               animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="max-w-md mx-auto text-center py-20 bg-white rounded-[32px] p-12 shadow-sm border border-gray-100"
+              exit={{ opacity: 0, scale: 0.98 }}
+              className="relative bg-white/70 backdrop-blur-sm p-4 sm:p-8 rounded-[36px] border border-gray-200 shadow-xl"
             >
-              <div className="w-20 h-20 bg-emerald-50 text-emerald-500 rounded-full flex items-center justify-center mx-auto mb-6">
-                <CheckCircle2 className="w-10 h-10" />
-              </div>
-              <h2 className="text-2xl font-serif font-medium mb-2">Session Complete!</h2>
-              <p className="text-gray-500 mb-8 leading-relaxed">
-                You've reviewed all due links for this topic. Great job keeping your streak alive!
-              </p>
-              <button
-                onClick={() => setSessionComplete(false)}
-                className="w-full py-4 bg-gray-900 text-white rounded-2xl font-medium hover:bg-black transition-all"
-              >
-                Back to Dashboard
-              </button>
-            </motion.div>
-          ) : isReviewing && (selectedPracticeLink || dueLinks.length > 0) ? (
-            <motion.div
-              key="quiz"
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -20 }}
-              className="flex flex-col items-center"
-            >
-              <div className="mb-8 text-center flex items-center gap-4">
-                <button 
-                  onClick={() => {
-                    setIsReviewing(false);
-                    setSelectedPracticeLink(null);
-                  }}
-                  className="p-2 hover:bg-white rounded-full transition-colors text-gray-400 hover:text-gray-900"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-                <div>
-                  <h2 className="text-sm font-mono text-gray-400 uppercase tracking-[0.2em] mb-1">
-                    {selectedPracticeLink ? 'Practicing' : `Reviewing ${activeTopic}`}
-                  </h2>
-                  <div className="flex items-center gap-2 text-xs text-gray-500">
-                    <span>{selectedPracticeLink ? 'Single Session' : `${dueLinks.length} remaining`}</span>
-                  </div>
-                </div>
-              </div>
-              <PracticeLinkCard 
-                link={selectedPracticeLink || dueLinks[0]} 
-                onRate={(q, t, p) => handleRate(selectedPracticeLink || dueLinks[0], q, t, p)} 
-                onAudioSubmit={(base64) => handleAudioSubmit(selectedPracticeLink || dueLinks[0], base64)}
-                isSubmittingAudio={isSubmittingAudio}
-              />
-            </motion.div>
-          ) : activeTab === 'dashboard' ? (
-            <motion.div
-              key="dashboard"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              className="space-y-8"
-            >
-              {/* Top Bar */}
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
-                <div>
-                  <h1 className="text-3xl font-serif font-medium text-gray-900">Practice Dashboard</h1>
-                  <p className="text-gray-500 text-sm">Manage and review your practice problems.</p>
-                </div>
-                <button
-                  onClick={() => setIsAdding(true)}
-                  className="flex items-center justify-center gap-2 px-6 py-3 bg-gray-900 text-white rounded-2xl font-medium hover:bg-black transition-all shadow-lg shadow-gray-200"
-                >
-                  <Plus className="w-5 h-5" />
-                  Add Practice Link
-                </button>
-              </div>
-
-              {/* Stats & Filters Row */}
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                <div className="bg-white rounded-3xl p-6 shadow-sm border border-gray-100 flex items-center gap-4">
-                  <div className="w-12 h-12 bg-blue-50 text-blue-600 rounded-2xl flex items-center justify-center">
-                    <BarChart3 className="w-6 h-6" />
-                  </div>
-                  <div>
-                    <p className="text-[10px] text-gray-400 font-mono uppercase tracking-widest">Total Links</p>
-                    <p className="text-2xl font-serif font-medium">{links.length}</p>
-                  </div>
-                </div>
-
-                <div className="bg-white rounded-3xl p-6 shadow-sm border border-gray-100 flex items-center gap-4">
-                  <div className="w-12 h-12 bg-orange-50 text-orange-600 rounded-2xl flex items-center justify-center">
-                    <Clock className="w-6 h-6" />
-                  </div>
-                  <div>
-                    <p className="text-[10px] text-gray-400 font-mono uppercase tracking-widest">Due Today</p>
-                    <p className="text-2xl font-serif font-medium">{links.filter(isDue).length}</p>
-                  </div>
-                </div>
-
-                {dueLinks.length > 0 ? (
-                  <button
-                    onClick={() => handleStartPractice(dueLinks[0])}
-                    className="py-4 bg-emerald-600 text-white rounded-3xl font-medium hover:bg-emerald-700 transition-all flex flex-col items-center justify-center gap-0.5 shadow-lg shadow-emerald-100 group"
-                  >
-                    <div className="flex items-center gap-2">
-                      <Sparkles className="w-5 h-5 group-hover:scale-110 transition-transform" />
-                      <span className="text-lg">Start Practice</span>
-                    </div>
-                    <span className="text-[10px] opacity-70 uppercase tracking-widest font-mono">
-                      {dueLinks.length} items waiting
+              <div className="flex items-center justify-between mb-6 pb-4 border-b border-gray-100">
+                <div className="flex items-center gap-2">
+                  <div className="w-3 h-3 bg-emerald-500 rounded-full animate-pulse" />
+                  <span className="text-xs font-mono font-bold uppercase tracking-wider text-gray-700">
+                    Live Practice Session
+                  </span>
+                  {dueItems.length > 0 && (
+                    <span className="text-xs font-mono text-gray-400">
+                      ({dueItems.length} problem{dueItems.length > 1 ? 's' : ''} due)
                     </span>
-                  </button>
-                ) : (
-                  <div className="bg-gray-50 rounded-3xl p-6 border border-dashed border-gray-200 flex items-center justify-center text-gray-400 text-xs font-medium">
-                    All caught up!
-                  </div>
-                )}
-
+                  )}
+                </div>
                 <button
-                  onClick={handleResetAllToToday}
-                  className="py-4 border border-gray-200 rounded-3xl text-[10px] font-mono uppercase tracking-widest text-gray-500 hover:bg-white hover:border-gray-900 hover:text-gray-900 transition-all flex items-center justify-center gap-2"
+                  onClick={() => {
+                    setIsPracticing(false);
+                    setCurrentPracticeItem(null);
+                  }}
+                  className="px-3 py-1 text-xs font-mono text-gray-500 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors flex items-center gap-1"
                 >
-                  <RotateCcw className="w-4 h-4" />
-                  Reset All to Today
+                  <X className="w-4 h-4" /> Exit Session
                 </button>
               </div>
 
-              <div className="space-y-6">
-                {/* Filters */}
-                  <div className="flex flex-wrap gap-4 items-center bg-white p-4 rounded-3xl border border-gray-100 shadow-sm">
-                    <div className="flex items-center gap-2 text-gray-400 px-2">
-                      <Filter className="w-4 h-4" />
-                      <span className="text-[10px] font-mono uppercase tracking-wider">Filters</span>
-                    </div>
-                    
-                    <div className="flex gap-2">
-                      {['all', 'python', 'sql'].map((t) => (
-                        <button
-                          key={t}
-                          onClick={() => setActiveTopic(t as any)}
-                          className={cn(
-                            "px-3 py-1.5 rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all",
-                            activeTopic === t ? "bg-gray-900 text-white" : "bg-gray-50 text-gray-500 hover:bg-gray-100"
-                          )}
-                        >
-                          {t}
-                        </button>
-                      ))}
-                    </div>
-
-                    <div className="w-px h-4 bg-gray-100" />
-
-                    <select 
-                      value={activeDifficulty}
-                      onChange={(e) => setActiveDifficulty(e.target.value as any)}
-                      className="bg-transparent text-xs font-medium text-gray-600 outline-none cursor-pointer"
-                    >
-                      <option value="all">All Difficulties</option>
-                      <option value="Beginner">Beginner</option>
-                      <option value="Intermediate">Intermediate</option>
-                      <option value="Advanced">Advanced</option>
-                    </select>
-
-                    <div className="w-px h-4 bg-gray-100" />
-
-                    <select 
-                      value={activeSubTopic}
-                      onChange={(e) => setActiveSubTopic(e.target.value)}
-                      className="bg-transparent text-xs font-medium text-gray-600 outline-none cursor-pointer max-w-[150px] truncate"
-                    >
-                      <option value="all">All Sub-topics</option>
-                      {subTopics.map(st => (
-                        <option key={st} value={st}>{st}</option>
-                      ))}
-                    </select>
-                  </div>
-
-                  {/* Table View */}
-                  <div className="bg-white rounded-[32px] shadow-sm border border-gray-100 overflow-hidden">
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-left border-collapse">
-                        <thead>
-                          <tr className="border-b border-gray-50">
-                            <th className="px-4 py-6 text-[10px] font-mono uppercase tracking-widest text-gray-400"></th>
-                            <th className="px-8 py-6 text-[10px] font-mono uppercase tracking-widest text-gray-400">Problem</th>
-                            <th className="px-6 py-6 text-[10px] font-mono uppercase tracking-widest text-gray-400">Topic</th>
-                            <th className="px-6 py-6 text-[10px] font-mono uppercase tracking-widest text-gray-400">Difficulty</th>
-                            <th className="px-6 py-6 text-[10px] font-mono uppercase tracking-widest text-gray-400">Performance</th>
-                            <th className="px-6 py-6 text-[10px] font-mono uppercase tracking-widest text-gray-400">SRS</th>
-                            <th className="px-6 py-6 text-[10px] font-mono uppercase tracking-widest text-gray-400">Priority</th>
-                            <th className="px-6 py-6 text-[10px] font-mono uppercase tracking-widest text-gray-400">Last Practice</th>
-                            <th className="px-6 py-6 text-[10px] font-mono uppercase tracking-widest text-gray-400">Next Review</th>
-                            <th className="px-6 py-6 text-[10px] font-mono uppercase tracking-widest text-gray-400"></th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-gray-50">
-                          {links.filter(l => {
-                            const matchesTopic = activeTopic === 'all' || l.topic === activeTopic;
-                            const matchesDifficulty = activeDifficulty === 'all' || l.difficulty === activeDifficulty;
-                            const matchesSubTopic = activeSubTopic === 'all' || l.subTopic === activeSubTopic;
-                            return matchesTopic && matchesDifficulty && matchesSubTopic;
-                          }).map((link) => (
-                            <tr key={link.id} className="group hover:bg-gray-50/50 transition-colors">
-                              <td className="px-4 py-6">
-                                <button
-                                  onClick={() => handleStartPractice(link)}
-                                  className="p-2 bg-emerald-50 text-emerald-600 rounded-xl hover:bg-emerald-600 hover:text-white transition-all shadow-sm group-hover:scale-110"
-                                  title="Practice Now"
-                                >
-                                  <Play className="w-4 h-4 fill-current" />
-                                </button>
-                              </td>
-                              <td className="px-8 py-6">
-                                <div className="flex flex-col gap-1">
-                                  <div className="flex items-center gap-2">
-                                    <span className="font-serif font-medium text-gray-900">{link.title}</span>
-                                    {link.transcript && (
-                                      <div className="px-1.5 py-0.5 bg-blue-50 text-blue-600 rounded text-[8px] font-bold uppercase tracking-wider" title="Has Transcript">
-                                        Transcript
-                                      </div>
-                                    )}
-                                  </div>
-                                  <div className="flex items-center gap-2 text-[10px] text-gray-400">
-                                    {link.url ? (
-                                      <>
-                                        <span className="truncate max-w-[200px]">{link.url}</span>
-                                        <a href={link.url} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:text-blue-700">
-                                          <ExternalLink className="w-3 h-3" />
-                                        </a>
-                                      </>
-                                    ) : (
-                                      <span className="italic">Transcript Only</span>
-                                    )}
-                                  </div>
-                                </div>
-                              </td>
-                              <td className="px-6 py-6">
-                                <div className="flex flex-col gap-1">
-                                  <span className="text-[10px] font-bold uppercase tracking-wider text-gray-500">{link.topic}</span>
-                                  <span className="text-[10px] text-gray-400">{link.subTopic || 'General'}</span>
-                                </div>
-                              </td>
-                              <td className="px-6 py-6">
-                                <div className="flex flex-col gap-2">
-                                  <span className={cn(
-                                    "px-2 py-1 rounded-md text-[9px] font-bold uppercase tracking-wider w-fit",
-                                    link.difficulty === 'Beginner' && "bg-green-50 text-green-600",
-                                    link.difficulty === 'Intermediate' && "bg-orange-50 text-orange-600",
-                                    link.difficulty === 'Advanced' && "bg-red-50 text-red-600"
-                                  )}>
-                                    {link.difficulty}
-                                  </span>
-                                  {link.personalDifficulty && (
-                                    <div className="flex items-center gap-1 text-blue-500 font-bold" title="Personal Difficulty">
-                                      <Sparkles className="w-3 h-3" />
-                                      <span className="text-[9px] font-mono">{link.personalDifficulty}/10</span>
-                                    </div>
-                                  )}
-                                </div>
-                              </td>
-                              <td className="px-6 py-6">
-                                <div className="flex flex-col gap-2">
-                                  <div className="flex flex-wrap items-center gap-3 text-[9px] font-mono text-gray-400">
-                                    <div className="flex items-center gap-1" title="Total Practices">
-                                      <RotateCcw className="w-3 h-3" />
-                                      <span>{link.totalRepetitions || 0}x</span>
-                                    </div>
-                                    <div className="flex items-center gap-1" title="Average Solve Time">
-                                      <Clock className="w-3 h-3" />
-                                      <span>Avg: {Math.floor((link.averageSolveTime || 0) / 60)}m</span>
-                                    </div>
-                                  </div>
-                                  <div className="flex items-center gap-2 text-[9px] font-mono font-bold text-gray-500">
-                                    <Clock className="w-3 h-3 text-blue-400" />
-                                    <span>Last: {Math.floor((link.lastSolveTime || 0) / 60)}m {link.lastSolveTime % 60}s</span>
-                                  </div>
-                                </div>
-                              </td>
-                              <td className="px-6 py-6">
-                                <div className="flex flex-col gap-1 text-[9px] font-mono text-gray-500">
-                                  <div className="flex items-center justify-between gap-4">
-                                    <span className="text-gray-400 uppercase tracking-tighter">Streak:</span>
-                                    <span className="font-bold text-gray-700">{link.repetitions}</span>
-                                  </div>
-                                  <div className="flex items-center justify-between gap-4">
-                                    <span className="text-gray-400 uppercase tracking-tighter">Interval:</span>
-                                    <span className="font-bold text-gray-700">{link.interval}d</span>
-                                  </div>
-                                  <div className="flex items-center justify-between gap-4">
-                                    <span className="text-gray-400 uppercase tracking-tighter">EF:</span>
-                                    <span className="font-bold text-gray-700">{link.easinessFactor.toFixed(2)}</span>
-                                  </div>
-                                </div>
-                              </td>
-                              <td className="px-6 py-6">
-                                <div className="flex items-center gap-2">
-                                  <div className="w-12 h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                                    <div 
-                                      className={cn(
-                                        "h-full rounded-full",
-                                        (link.priorityScore || 0) < 0 ? "bg-blue-300" :
-                                        (link.priorityScore || 0) > 10000 ? "bg-red-500" : 
-                                        (link.priorityScore || 0) > 5000 ? "bg-orange-500" : "bg-green-500"
-                                      )}
-                                      style={{ width: `${(link.priorityScore || 0) < 0 ? 100 : Math.min(100, (link.priorityScore || 0) / 150)}%` }}
-                                    />
-                                  </div>
-                                  <span className="text-[10px] font-mono font-bold text-gray-600">
-                                    {(link.priorityScore || 0) < 0 ? "FRESH" : (link.priorityScore || 0)}
-                                  </span>
-                                </div>
-                              </td>
-                              <td className="px-6 py-6">
-                                <div className="flex items-center gap-2 text-[10px] font-mono text-gray-500">
-                                  {link.lastReviewDate ? (
-                                    <span>{formatDateInTZ(link.lastReviewDate)}</span>
-                                  ) : (
-                                    <span className="text-gray-300 italic">Never</span>
-                                  )}
-                                </div>
-                              </td>
-                              <td className="px-6 py-6">
-                                <div className="flex items-center gap-2 text-[10px] font-mono text-gray-500">
-                                  {isDue(link) ? (
-                                    <span className="text-orange-500 font-bold">DUE NOW</span>
-                                  ) : (
-                                    <span>{formatDateInTZ(link.nextReviewDate)}</span>
-                                  )}
-                                </div>
-                              </td>
-                              <td className="px-6 py-6 text-right">
-                                <div className="flex items-center justify-end gap-2">
-                                  <button 
-                                    onClick={() => handleEditClick(link)}
-                                    className="p-2 text-gray-300 hover:text-blue-500 transition-colors"
-                                    title="Edit Problem"
-                                  >
-                                    <Pencil className="w-4 h-4" />
-                                  </button>
-                                  <button 
-                                    onClick={() => handleDelete(link.id)}
-                                    className="p-2 text-gray-300 hover:text-red-500 transition-colors"
-                                    title="Delete Problem"
-                                  >
-                                    <Trash2 className="w-4 h-4" />
-                                  </button>
-                                </div>
-                              </td>
-                            </tr>
-                          ))}
-                          {links.length === 0 && (
-                            <tr>
-                              <td colSpan={10} className="px-8 py-20 text-center text-gray-400 italic text-sm">
-                                No practice links added yet. Click "Add Practice Link" to get started.
-                              </td>
-                            </tr>
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                </div>
-              </motion.div>
-          ) : (
-            <motion.div
-              key="tutoring"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              className="space-y-8"
-            >
-              <div className="flex items-center justify-between">
-                <div>
-                  <h1 className="text-3xl font-serif font-medium text-gray-900">Tutoring & Grading</h1>
-                  <p className="text-gray-500 text-sm">Review your recorded explanations and AI feedback.</p>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                <div className="lg:col-span-1 space-y-6">
-                  <div className="bg-white rounded-3xl p-8 shadow-sm border border-gray-100">
-                    <h3 className="text-xs font-mono text-gray-400 uppercase tracking-widest mb-6 flex items-center gap-2">
-                      <History className="w-4 h-4" />
-                      Submission History
-                    </h3>
-                    <div className="space-y-4 max-h-[600px] overflow-y-auto pr-2">
-                      {submissions.map((sub) => {
-                        const link = links.find(l => l.id === sub.linkId);
-                        return (
-                          <button
-                            key={sub.id}
-                            onClick={() => setSelectedSubmission(sub)}
-                            className={cn(
-                              "w-full text-left p-4 rounded-2xl border transition-all",
-                              selectedSubmission?.id === sub.id 
-                                ? "bg-gray-900 border-gray-900 text-white shadow-lg" 
-                                : "bg-white border-gray-100 hover:border-gray-300 text-gray-900"
-                            )}
-                          >
-                            <div className="flex justify-between items-start mb-1">
-                              <span className="text-xs font-serif font-medium truncate flex-1">{link?.title || 'Unknown Problem'}</span>
-                              <div className="flex items-center gap-1 bg-yellow-400/20 text-yellow-600 px-1.5 py-0.5 rounded text-[8px] font-bold">
-                                <Star className="w-2 h-2 fill-current" />
-                                {sub.grade}/5
-                              </div>
-                            </div>
-                            <p className={cn(
-                              "text-[10px] font-mono uppercase tracking-tighter",
-                              selectedSubmission?.id === sub.id ? "text-gray-400" : "text-gray-400"
-                            )}>
-                              {new Date(sub.createdAt).toLocaleDateString()} • {new Date(sub.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                            </p>
-                          </button>
-                        );
-                      })}
-                      {submissions.length === 0 && (
-                        <div className="text-center py-12 text-gray-400 italic text-sm">
-                          No submissions yet. Record an explanation during practice to get started.
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="lg:col-span-2">
-                  <AnimatePresence mode="wait">
-                    {selectedSubmission ? (
-                      <motion.div
-                        key={selectedSubmission.id}
-                        initial={{ opacity: 0, y: 20 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, y: -20 }}
-                        className="bg-white rounded-[40px] p-10 shadow-sm border border-gray-100 space-y-8"
-                      >
-                        <div className="flex items-center justify-between border-b border-gray-50 pb-6">
-                          <div>
-                            <h2 className="text-2xl font-serif font-medium text-gray-900">
-                              {links.find(l => l.id === selectedSubmission.linkId)?.title || 'Submission Details'}
-                            </h2>
-                            <p className="text-gray-400 text-xs font-mono uppercase tracking-widest mt-1">
-                              Graded on {new Date(selectedSubmission.createdAt).toLocaleString()}
-                            </p>
-                          </div>
-                          <div className="flex flex-col items-center gap-1">
-                            <div className="text-4xl font-serif font-bold text-gray-900">{selectedSubmission.grade}</div>
-                            <div className="text-[10px] font-mono uppercase tracking-widest text-gray-400">Score / 5</div>
-                          </div>
-                        </div>
-
-                        <div className="space-y-6">
-                          <div className="space-y-3">
-                            <h3 className="text-[10px] font-mono uppercase tracking-widest text-gray-400 flex items-center gap-2">
-                              <Sparkles className="w-4 h-4 text-emerald-500" />
-                              AI Feedback
-                            </h3>
-                            <div className="bg-emerald-50/30 p-6 rounded-3xl border border-emerald-100/50 text-gray-700 text-sm leading-relaxed prose prose-sm max-w-none">
-                              <Markdown>{selectedSubmission.feedback}</Markdown>
-                            </div>
-                          </div>
-
-                          <div className="space-y-3">
-                            <h3 className="text-[10px] font-mono uppercase tracking-widest text-gray-400 flex items-center gap-2">
-                              <Mic2 className="w-4 h-4 text-blue-500" />
-                              Transcript
-                            </h3>
-                            <div className="bg-gray-50 p-6 rounded-3xl border border-gray-100 text-gray-600 text-sm leading-relaxed italic font-serif">
-                              "{selectedSubmission.transcript}"
-                            </div>
-                          </div>
-                        </div>
-                      </motion.div>
-                    ) : (
-                      <div className="h-full min-h-[400px] bg-gray-50/50 rounded-[40px] border border-dashed border-gray-200 flex flex-col items-center justify-center text-gray-400 gap-4">
-                        <div className="w-16 h-16 bg-white rounded-full flex items-center justify-center shadow-sm">
-                          <Mic2 className="w-8 h-8 text-gray-200" />
-                        </div>
-                        <p className="text-sm font-medium">Select a submission to view grading details</p>
-                      </div>
-                    )}
-                  </AnimatePresence>
-                </div>
-              </div>
+              <PracticeLinkCard
+                link={currentPracticeItem}
+                onRate={handleRatePractice}
+                onClose={() => {
+                  setIsPracticing(false);
+                  setCurrentPracticeItem(null);
+                }}
+              />
             </motion.div>
           )}
         </AnimatePresence>
+
+        {/* Top Hero: Deadline Countdown & Smart Recommendation */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          
+          {/* Target Deadline Card */}
+          <div className="bg-gradient-to-br from-gray-900 to-gray-800 text-white rounded-3xl p-6 shadow-md flex flex-col justify-between relative overflow-hidden">
+            <div className="absolute right-0 top-0 translate-x-4 -translate-y-4 w-36 h-36 bg-blue-500/10 rounded-full blur-2xl pointer-events-none" />
+            <div>
+              <div className="flex items-center justify-between mb-4">
+                <span className="px-3 py-1 bg-white/10 rounded-full text-[10px] font-mono font-semibold uppercase tracking-wider text-blue-200 flex items-center gap-1.5">
+                  <Target className="w-3.5 h-3.5 text-blue-400" />
+                  Interview Target
+                </span>
+                <span className="text-xs font-mono text-gray-400">May 15</span>
+              </div>
+              <p className="text-xs text-gray-400 font-mono uppercase tracking-wider">Countdown</p>
+              <div className="flex items-baseline gap-2 mt-1">
+                <span className="text-4xl sm:text-5xl font-serif font-bold text-white tracking-tight">
+                  {deadlineInfo.daysRemaining}
+                </span>
+                <span className="text-sm font-mono text-gray-300">days left</span>
+              </div>
+            </div>
+
+            <div className="mt-6 pt-4 border-t border-white/10 flex items-center justify-between text-xs font-mono text-gray-300">
+              <span>Goal: Master SQL & Python</span>
+              <span className="text-emerald-400 font-bold">{stats.masteryPercent}% ready</span>
+            </div>
+          </div>
+
+          {/* Smart Recommendation Hero Card */}
+          <div className="lg:col-span-2 bg-white rounded-3xl p-6 shadow-sm border border-gray-100 flex flex-col justify-between">
+            {topRecommendation ? (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="p-1.5 bg-amber-50 text-amber-600 rounded-xl">
+                      <Sparkles className="w-4 h-4" />
+                    </span>
+                    <span className="text-xs font-mono font-bold uppercase tracking-wider text-amber-700">
+                      Recommended Next Problem
+                    </span>
+                  </div>
+                  <span className="text-[11px] font-mono text-gray-400 bg-gray-50 px-2.5 py-1 rounded-full">
+                    Priority Score: {topRecommendation.item.priorityScore}
+                  </span>
+                </div>
+
+                <div>
+                  <div className="flex items-center gap-2 mb-1 flex-wrap">
+                    <span className={cn(
+                      "px-2 py-0.5 text-[10px] font-mono font-bold uppercase rounded",
+                      topRecommendation.item.topic === 'python' ? "bg-blue-50 text-blue-700" : "bg-emerald-50 text-emerald-700"
+                    )}>
+                      {topRecommendation.item.topic}
+                    </span>
+                    <span className="text-xs font-mono text-gray-400">
+                      {topRecommendation.item.subTopic || 'General'}
+                    </span>
+                    <span className="text-xs text-gray-300">•</span>
+                    <span className="text-xs font-mono text-gray-500">
+                      {topRecommendation.item.difficulty}
+                    </span>
+                  </div>
+                  <h3 className="text-xl font-serif font-bold text-gray-900">
+                    {topRecommendation.item.title}
+                  </h3>
+                  <p className="text-xs text-gray-500 mt-1 italic">
+                    Why: {topRecommendation.reason}
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-3 pt-2">
+                  <button
+                    onClick={() => handleStartPractice(topRecommendation.item)}
+                    className="px-6 py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl font-medium text-sm transition-all flex items-center gap-2 shadow-md shadow-emerald-100 group"
+                  >
+                    <Play className="w-4 h-4 fill-current group-hover:scale-110 transition-transform" />
+                    <span>Start Recommended Practice</span>
+                  </button>
+                  {topRecommendation.item.url && (
+                    <a
+                      href={topRecommendation.item.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-4 py-3 border border-gray-200 rounded-2xl text-xs font-mono text-gray-600 hover:bg-gray-50 transition-colors flex items-center gap-1.5"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      <span>Open Link</span>
+                    </a>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-col items-center justify-center py-8 text-center text-gray-400">
+                <BookOpen className="w-8 h-8 mb-2 stroke-1" />
+                <p className="text-sm font-serif">No problems added yet.</p>
+                <button
+                  onClick={handleResetToStarters}
+                  className="mt-3 px-4 py-2 bg-gray-900 text-white rounded-xl text-xs font-medium"
+                >
+                  Load Curated Starter Problems
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Progress Metrics Overview */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm flex items-center gap-4">
+            <div className="w-12 h-12 bg-blue-50 text-blue-600 rounded-2xl flex items-center justify-center flex-shrink-0">
+              <Layers className="w-6 h-6" />
+            </div>
+            <div>
+              <p className="text-[10px] font-mono uppercase tracking-wider text-gray-400">Total Tracked</p>
+              <p className="text-2xl font-serif font-bold text-gray-900">{stats.total}</p>
+            </div>
+          </div>
+
+          <div className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm flex items-center gap-4">
+            <div className="w-12 h-12 bg-amber-50 text-amber-600 rounded-2xl flex items-center justify-center flex-shrink-0">
+              <Clock className="w-6 h-6" />
+            </div>
+            <div>
+              <p className="text-[10px] font-mono uppercase tracking-wider text-gray-400">Due for Review</p>
+              <p className="text-2xl font-serif font-bold text-amber-600">{stats.dueCount}</p>
+            </div>
+          </div>
+
+          <div className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm flex items-center gap-4">
+            <div className="w-12 h-12 bg-emerald-50 text-emerald-600 rounded-2xl flex items-center justify-center flex-shrink-0">
+              <CheckCircle2 className="w-6 h-6" />
+            </div>
+            <div>
+              <p className="text-[10px] font-mono uppercase tracking-wider text-gray-400">Mastery</p>
+              <p className="text-2xl font-serif font-bold text-gray-900">{stats.masteryPercent}%</p>
+            </div>
+          </div>
+
+          <div className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm flex items-center gap-4">
+            <div className="w-12 h-12 bg-purple-50 text-purple-600 rounded-2xl flex items-center justify-center flex-shrink-0">
+              <Flame className="w-6 h-6" />
+            </div>
+            <div>
+              <p className="text-[10px] font-mono uppercase tracking-wider text-gray-400">Total Practice</p>
+              <p className="text-2xl font-serif font-bold text-gray-900">{stats.totalReviews}x</p>
+            </div>
+          </div>
+        </div>
+
+        {/* Topic Breakdown Bars (Python & SQL) */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="px-2.5 py-1 bg-blue-50 text-blue-700 rounded-lg text-xs font-mono font-bold uppercase">
+                  Python
+                </span>
+                <span className="text-xs text-gray-400 font-mono">
+                  {stats.pythonMastered} / {stats.pythonCount} Mastered
+                </span>
+              </div>
+              <span className="text-sm font-mono font-bold text-blue-700">{stats.pythonPercent}%</span>
+            </div>
+            <div className="w-full h-2.5 bg-gray-100 rounded-full overflow-hidden">
+              <div 
+                className="h-full bg-blue-600 rounded-full transition-all duration-500" 
+                style={{ width: `${stats.pythonPercent}%` }} 
+              />
+            </div>
+          </div>
+
+          <div className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="px-2.5 py-1 bg-emerald-50 text-emerald-700 rounded-lg text-xs font-mono font-bold uppercase">
+                  SQL
+                </span>
+                <span className="text-xs text-gray-400 font-mono">
+                  {stats.sqlMastered} / {stats.sqlCount} Mastered
+                </span>
+              </div>
+              <span className="text-sm font-mono font-bold text-emerald-700">{stats.sqlPercent}%</span>
+            </div>
+            <div className="w-full h-2.5 bg-gray-100 rounded-full overflow-hidden">
+              <div 
+                className="h-full bg-emerald-600 rounded-full transition-all duration-500" 
+                style={{ width: `${stats.sqlPercent}%` }} 
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Filters and Search Bar */}
+        <div className="bg-white p-4 sm:p-5 rounded-3xl border border-gray-100 shadow-sm flex flex-wrap gap-4 items-center justify-between">
+          <div className="flex flex-wrap gap-2 items-center">
+            {/* Topic Filter Buttons */}
+            <div className="flex gap-1 bg-gray-50 p-1 rounded-2xl border border-gray-100">
+              {(['all', 'python', 'sql'] as const).map(t => (
+                <button
+                  key={t}
+                  onClick={() => setActiveTopic(t)}
+                  className={cn(
+                    "px-3 py-1.5 rounded-xl text-xs font-mono font-bold uppercase tracking-wider transition-all",
+                    activeTopic === t ? "bg-gray-900 text-white shadow-sm" : "text-gray-500 hover:text-gray-900"
+                  )}
+                >
+                  {t}
+                </button>
+              ))}
+            </div>
+
+            {/* Difficulty Filter */}
+            <select
+              value={activeDifficulty}
+              onChange={e => setActiveDifficulty(e.target.value as any)}
+              className="px-3 py-2 bg-gray-50 border border-gray-100 rounded-xl text-xs font-mono text-gray-700 focus:outline-none"
+            >
+              <option value="all">All Difficulties</option>
+              <option value="Beginner">Beginner</option>
+              <option value="Intermediate">Intermediate</option>
+              <option value="Advanced">Advanced</option>
+            </select>
+
+            {/* Subtopic Filter */}
+            {subTopics.length > 0 && (
+              <select
+                value={activeSubTopic}
+                onChange={e => setActiveSubTopic(e.target.value)}
+                className="px-3 py-2 bg-gray-50 border border-gray-100 rounded-xl text-xs font-mono text-gray-700 focus:outline-none max-w-[160px] truncate"
+              >
+                <option value="all">All Subtopics</option>
+                {subTopics.map(st => (
+                  <option key={st} value={st}>{st}</option>
+                ))}
+              </select>
+            )}
+
+            {/* Only Due Toggle */}
+            <button
+              onClick={() => setOnlyDue(!onlyDue)}
+              className={cn(
+                "px-3 py-2 rounded-xl text-xs font-mono font-medium transition-all flex items-center gap-1.5",
+                onlyDue
+                  ? "bg-amber-100 text-amber-800 border border-amber-200"
+                  : "bg-gray-50 text-gray-600 hover:bg-gray-100 border border-gray-100"
+              )}
+            >
+              <Clock className="w-3.5 h-3.5" />
+              <span>Only Due ({dueItems.length})</span>
+            </button>
+          </div>
+
+          {/* Search Input */}
+          <div className="relative flex-1 min-w-[200px] max-w-sm">
+            <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              placeholder="Search problems, notes..."
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              className="w-full pl-9 pr-4 py-2 bg-gray-50 border border-gray-100 rounded-xl text-xs text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900"
+            />
+          </div>
+        </div>
+
+        {/* Problems & Projects Table */}
+        <div className="bg-white rounded-3xl border border-gray-100 shadow-sm overflow-hidden">
+          <div className="p-5 border-b border-gray-100 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <h2 className="font-serif font-bold text-lg text-gray-900">Your Practice Catalog</h2>
+              <span className="text-xs font-mono text-gray-400">({filteredLinks.length} items)</span>
+            </div>
+
+            <button
+              onClick={handleResetToStarters}
+              className="text-xs font-mono text-gray-400 hover:text-gray-700 flex items-center gap-1 transition-colors"
+            >
+              <RotateCcw className="w-3 h-3" />
+              <span>Reset to Starters</span>
+            </button>
+          </div>
+
+          {filteredLinks.length === 0 ? (
+            <div className="p-12 text-center text-gray-400 font-serif">
+              <p>No practice items match your current filter.</p>
+              <button
+                onClick={() => {
+                  setActiveTopic('all');
+                  setActiveDifficulty('all');
+                  setActiveSubTopic('all');
+                  setOnlyDue(false);
+                  setSearchQuery('');
+                }}
+                className="mt-2 text-xs font-mono text-blue-600 hover:underline"
+              >
+                Clear all filters
+              </button>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="border-b border-gray-100 text-[10px] font-mono uppercase tracking-wider text-gray-400">
+                    <th className="px-6 py-4">Action</th>
+                    <th className="px-6 py-4">Problem</th>
+                    <th className="px-6 py-4">Topic & Area</th>
+                    <th className="px-6 py-4">Difficulty</th>
+                    <th className="px-6 py-4">SRS State</th>
+                    <th className="px-6 py-4">Last / Next</th>
+                    <th className="px-6 py-4 text-right">Manage</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-50 text-sm">
+                  {filteredLinks.map(item => {
+                    const itemIsDue = isDue(item);
+                    return (
+                      <tr key={item.id} className="hover:bg-gray-50/70 transition-colors group">
+                        {/* Practice Button */}
+                        <td className="px-6 py-4">
+                          <button
+                            onClick={() => handleStartPractice(item)}
+                            className={cn(
+                              "p-2.5 rounded-xl transition-all shadow-sm flex items-center gap-1.5 text-xs font-mono font-medium",
+                              itemIsDue
+                                ? "bg-emerald-600 text-white hover:bg-emerald-700"
+                                : "bg-gray-100 text-gray-700 hover:bg-gray-900 hover:text-white"
+                            )}
+                            title="Practice problem now"
+                          >
+                            <Play className="w-3.5 h-3.5 fill-current" />
+                            <span className="hidden sm:inline">Practice</span>
+                          </button>
+                        </td>
+
+                        {/* Problem Title & External Link */}
+                        <td className="px-6 py-4">
+                          <div className="flex flex-col gap-0.5">
+                            <span className="font-serif font-bold text-gray-900 leading-tight">
+                              {item.title}
+                            </span>
+                            {item.url ? (
+                              <a
+                                href={item.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-[11px] font-mono text-blue-600 hover:text-blue-800 flex items-center gap-1 max-w-[240px] truncate"
+                              >
+                                <span className="truncate">{item.url.replace(/^https?:\/\//, '')}</span>
+                                <ExternalLink className="w-3 h-3 flex-shrink-0" />
+                              </a>
+                            ) : (
+                              <span className="text-[10px] font-mono text-gray-400 italic">Self-contained</span>
+                            )}
+                          </div>
+                        </td>
+
+                        {/* Topic & Subtopic */}
+                        <td className="px-6 py-4">
+                          <div className="flex flex-col gap-1">
+                            <span className={cn(
+                              "px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase tracking-wider w-fit",
+                              item.topic === 'python' ? "bg-blue-50 text-blue-700" : "bg-emerald-50 text-emerald-700"
+                            )}>
+                              {item.topic}
+                            </span>
+                            <span className="text-[11px] font-mono text-gray-500 truncate max-w-[140px]">
+                              {item.subTopic || 'General'}
+                            </span>
+                          </div>
+                        </td>
+
+                        {/* Difficulty */}
+                        <td className="px-6 py-4">
+                          <div className="flex flex-col gap-1">
+                            <span className={cn(
+                              "px-2 py-0.5 rounded text-[10px] font-mono font-semibold uppercase tracking-wider w-fit",
+                              item.difficulty === 'Beginner' && "bg-green-50 text-green-700",
+                              item.difficulty === 'Intermediate' && "bg-amber-50 text-amber-700",
+                              item.difficulty === 'Advanced' && "bg-rose-50 text-rose-700"
+                            )}>
+                              {item.difficulty}
+                            </span>
+                            <span className="text-[10px] font-mono text-gray-400">
+                              Felt: {item.personalDifficulty || 5}/10
+                            </span>
+                          </div>
+                        </td>
+
+                        {/* SRS Stats */}
+                        <td className="px-6 py-4 font-mono text-xs text-gray-600">
+                          <div className="flex flex-col gap-0.5">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[10px] text-gray-400 uppercase">Interval:</span>
+                              <span className="font-bold text-gray-900">{item.interval || 0}d</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-[10px] text-gray-400 uppercase">Practiced:</span>
+                              <span>{item.totalRepetitions || 0}x</span>
+                            </div>
+                          </div>
+                        </td>
+
+                        {/* Dates */}
+                        <td className="px-6 py-4 font-mono text-xs">
+                          <div className="flex flex-col gap-0.5">
+                            <div className="flex items-center gap-1.5">
+                              <span className={cn(
+                                "w-2 h-2 rounded-full",
+                                itemIsDue ? "bg-amber-500 animate-pulse" : "bg-gray-300"
+                              )} />
+                              <span className={cn("text-xs", itemIsDue ? "font-bold text-amber-700" : "text-gray-500")}>
+                                {itemIsDue ? 'Due Now' : formatDateInTZ(item.nextReviewDate, 'MMM d')}
+                              </span>
+                            </div>
+                            <span className="text-[10px] text-gray-400">
+                              {item.lastReviewDate ? `Last: ${formatDateInTZ(item.lastReviewDate, 'MMM d')}` : 'Never practiced'}
+                            </span>
+                          </div>
+                        </td>
+
+                        {/* Edit & Delete Actions */}
+                        <td className="px-6 py-4 text-right">
+                          <div className="flex items-center justify-end gap-2">
+                            <button
+                              onClick={() => handleOpenEdit(item)}
+                              className="p-1.5 text-gray-400 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
+                              title="Edit problem"
+                            >
+                              <Pencil className="w-4 h-4" />
+                            </button>
+                            <button
+                              onClick={() => handleDeleteItem(item.id, item.title)}
+                              className="p-1.5 text-gray-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors"
+                              title="Delete problem"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
       </main>
 
-      {/* Add Link Modal */}
+      {/* Add / Edit Modal */}
       <AnimatePresence>
-        {isAdding && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-6">
+        {isFormOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm overflow-y-auto">
             <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => {
-                setIsAdding(false);
-                setEditingId(null);
-              }}
-              className="absolute inset-0 bg-gray-900/40 backdrop-blur-sm"
-            />
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className="relative w-full max-w-xl bg-white rounded-[40px] p-10 shadow-2xl"
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-3xl p-6 sm:p-8 max-w-xl w-full shadow-2xl border border-gray-100 my-8 space-y-6"
             >
-              <div className="flex items-center justify-between mb-8">
-                <h2 className="text-2xl font-serif font-medium">{editingId ? 'Edit Problem' : 'Add Practice Link'}</h2>
-                <button onClick={() => {
-                  setIsAdding(false);
-                  setEditingId(null);
-                }} className="p-2 hover:bg-gray-100 rounded-full transition-colors">
+              <div className="flex items-center justify-between pb-4 border-b border-gray-100">
+                <h3 className="text-xl font-serif font-bold text-gray-900">
+                  {editingId ? 'Edit Practice Problem' : 'Add New Problem / Project'}
+                </h3>
+                <button
+                  onClick={() => setIsFormOpen(false)}
+                  className="p-1 text-gray-400 hover:text-gray-900 rounded-lg"
+                >
                   <X className="w-5 h-5" />
                 </button>
               </div>
 
-              <form onSubmit={handleAddLink} className="space-y-6">
-                <div className="space-y-2">
-                  <label className="text-[10px] font-mono uppercase tracking-widest text-gray-400 ml-1">URL</label>
+              <form onSubmit={handleSaveForm} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-mono uppercase tracking-wider text-gray-500 mb-1.5">
+                    Problem Title *
+                  </label>
                   <input
-                    required
-                    type="url"
-                    placeholder="https://leetcode.com/problems/..."
-                    value={newLink.url}
-                    onChange={e => setNewLink({ ...newLink, url: e.target.value })}
-                    className="w-full px-6 py-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-sm"
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-[10px] font-mono uppercase tracking-widest text-gray-400 ml-1">Title</label>
-                  <input
-                    required
                     type="text"
-                    placeholder="Problem Title"
-                    value={newLink.title}
-                    onChange={e => setNewLink({ ...newLink, title: e.target.value })}
-                    className="w-full px-6 py-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-sm"
+                    required
+                    placeholder="e.g., Department Top 3 Salaries or LRU Cache"
+                    value={formData.title}
+                    onChange={e => setFormData({ ...formData, title: e.target.value })}
+                    className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-gray-900"
                   />
                 </div>
 
-                <div className="grid grid-cols-2 gap-6">
-                  <div className="space-y-2">
-                    <label className="text-[10px] font-mono uppercase tracking-widest text-gray-400 ml-1">Topic</label>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-mono uppercase tracking-wider text-gray-500 mb-1.5">
+                      Topic *
+                    </label>
                     <select
-                      value={newLink.topic}
-                      onChange={e => setNewLink({ ...newLink, topic: e.target.value as Topic })}
-                      className="w-full px-6 py-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-sm appearance-none"
+                      value={formData.topic}
+                      onChange={e => setFormData({ ...formData, topic: e.target.value as Topic })}
+                      className="w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-gray-900"
                     >
-                      <option value="python">Python</option>
                       <option value="sql">SQL</option>
+                      <option value="python">Python</option>
                     </select>
                   </div>
-                  <div className="space-y-2">
-                    <label className="text-[10px] font-mono uppercase tracking-widest text-gray-400 ml-1">Difficulty</label>
+
+                  <div>
+                    <label className="block text-xs font-mono uppercase tracking-wider text-gray-500 mb-1.5">
+                      Difficulty
+                    </label>
                     <select
-                      value={newLink.difficulty}
-                      onChange={e => setNewLink({ ...newLink, difficulty: e.target.value as Difficulty })}
-                      className="w-full px-6 py-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-sm appearance-none"
+                      value={formData.difficulty}
+                      onChange={e => setFormData({ ...formData, difficulty: e.target.value as Difficulty })}
+                      className="w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-gray-900"
                     >
                       <option value="Beginner">Beginner</option>
                       <option value="Intermediate">Intermediate</option>
@@ -1075,162 +982,139 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="space-y-2">
-                  <label className="text-[10px] font-mono uppercase tracking-widest text-gray-400 ml-1">Sub-topic</label>
-                  <input
-                    type="text"
-                    placeholder="e.g. Data Types, JOINs"
-                    value={newLink.subTopic}
-                    onChange={e => setNewLink({ ...newLink, subTopic: e.target.value })}
-                    className="w-full px-6 py-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-sm"
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-[10px] font-mono uppercase tracking-widest text-gray-400 ml-1">Last Practice Date</label>
-                  <input
-                    type="date"
-                    value={newLink.lastReviewDate}
-                    onChange={e => setNewLink({ ...newLink, lastReviewDate: e.target.value })}
-                    className="w-full px-6 py-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-sm"
-                  />
-                </div>
-
-                <div className="grid grid-cols-2 gap-6">
-                  <div className="space-y-2">
-                    <label className="text-[10px] font-mono uppercase tracking-widest text-gray-400 ml-1">Total Practices</label>
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setNewLink({ ...newLink, totalRepetitions: Math.max(0, (Number(newLink.totalRepetitions) || 0) - 1) })}
-                        className="p-4 bg-gray-100 hover:bg-gray-200 rounded-2xl transition-colors"
-                      >
-                        <RotateCcw className="w-4 h-4" />
-                      </button>
-                      <input
-                        type="number"
-                        min="0"
-                        value={newLink.totalRepetitions}
-                        onChange={e => setNewLink({ ...newLink, totalRepetitions: parseInt(e.target.value) || 0 })}
-                        className="w-full px-6 py-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-sm text-center font-bold"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setNewLink({ ...newLink, totalRepetitions: (Number(newLink.totalRepetitions) || 0) + 1 })}
-                        className="p-4 bg-gray-100 hover:bg-gray-200 rounded-2xl transition-colors"
-                      >
-                        <Plus className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-[10px] font-mono uppercase tracking-widest text-gray-400 ml-1">Current Streak</label>
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setNewLink({ ...newLink, repetitions: Math.max(0, (Number(newLink.repetitions) || 0) - 1) })}
-                        className="p-4 bg-gray-100 hover:bg-gray-200 rounded-2xl transition-colors"
-                      >
-                        <RotateCcw className="w-4 h-4" />
-                      </button>
-                      <input
-                        type="number"
-                        min="0"
-                        value={newLink.repetitions}
-                        onChange={e => setNewLink({ ...newLink, repetitions: parseInt(e.target.value) || 0 })}
-                        className="w-full px-6 py-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-sm text-center font-bold"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setNewLink({ ...newLink, repetitions: (Number(newLink.repetitions) || 0) + 1 })}
-                        className="p-4 bg-gray-100 hover:bg-gray-200 rounded-2xl transition-colors"
-                      >
-                        <Plus className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-[10px] font-mono uppercase tracking-widest text-gray-400 ml-1">Question Content</label>
-                  <textarea
-                    placeholder="Paste the problem description or question here..."
-                    value={newLink.questionContent}
-                    onChange={e => setNewLink({ ...newLink, questionContent: e.target.value })}
-                    className="w-full px-6 py-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-sm min-h-[100px] resize-none"
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-[10px] font-mono uppercase tracking-widest text-gray-400 ml-1">Solution Content</label>
-                  <textarea
-                    placeholder="Paste the ideal solution or code here..."
-                    value={newLink.solutionContent}
-                    onChange={e => setNewLink({ ...newLink, solutionContent: e.target.value })}
-                    className="w-full px-6 py-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-sm min-h-[100px] resize-none"
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-[10px] font-mono uppercase tracking-widest text-gray-400 ml-1">Transcript / Reasoning Practice</label>
-                  <textarea
-                    placeholder="Paste your solution walkthrough or reasoning transcript here..."
-                    value={newLink.transcript}
-                    onChange={e => setNewLink({ ...newLink, transcript: e.target.value })}
-                    className="w-full px-6 py-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-sm min-h-[120px] resize-none"
-                  />
-                </div>
-
-                <div className="grid grid-cols-2 gap-6 p-6 bg-gray-50 rounded-3xl border border-gray-100">
-                  <div className="space-y-3">
-                    <label className="text-[10px] font-mono uppercase tracking-widest text-gray-400 ml-1">Initial Time Solved</label>
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="number"
-                        placeholder="Min"
-                        value={newLink.initialTimeMins}
-                        onChange={e => setNewLink({ ...newLink, initialTimeMins: e.target.value })}
-                        className="w-full px-4 py-3 bg-white border border-gray-100 rounded-xl outline-none text-xs font-mono"
-                      />
-                      <span className="text-gray-300">:</span>
-                      <input
-                        type="number"
-                        placeholder="Sec"
-                        value={newLink.initialTimeSecs}
-                        onChange={e => setNewLink({ ...newLink, initialTimeSecs: e.target.value })}
-                        className="w-full px-4 py-3 bg-white border border-gray-100 rounded-xl outline-none text-xs font-mono"
-                      />
-                    </div>
-                    <p className="text-[8px] text-gray-400 font-mono uppercase tracking-tighter">30 min max recommended</p>
-                  </div>
-
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between">
-                      <label className="text-[10px] font-mono uppercase tracking-widest text-gray-400 ml-1">Personal Difficulty</label>
-                      <span className="text-xs font-bold text-blue-600">{newLink.initialPersonalDifficulty}</span>
-                    </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-mono uppercase tracking-wider text-gray-500 mb-1.5">
+                      Subtopic / Area
+                    </label>
                     <input
-                      type="range"
+                      type="text"
+                      placeholder="e.g., CTE, Window Functions, DP"
+                      value={formData.subTopic}
+                      onChange={e => setFormData({ ...formData, subTopic: e.target.value })}
+                      className="w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-gray-900"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-mono uppercase tracking-wider text-gray-500 mb-1.5">
+                      Felt Difficulty (1 - 10)
+                    </label>
+                    <input
+                      type="number"
                       min="1"
                       max="10"
-                      value={newLink.initialPersonalDifficulty}
-                      onChange={e => setNewLink({ ...newLink, initialPersonalDifficulty: parseInt(e.target.value) })}
-                      className="w-full h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                      value={formData.personalDifficulty}
+                      onChange={e => setFormData({ ...formData, personalDifficulty: parseInt(e.target.value) || 5 })}
+                      className="w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-gray-900 font-mono"
                     />
-                    <div className="flex justify-between text-[8px] font-mono text-gray-400 uppercase tracking-tighter">
-                      <span>Easy</span>
-                      <span>Hard</span>
-                    </div>
                   </div>
                 </div>
 
-                <button
-                  type="submit"
-                  className="w-full py-5 bg-gray-900 text-white rounded-3xl font-medium hover:bg-black transition-all shadow-xl shadow-gray-200 mt-4"
-                >
-                  {editingId ? 'Save Changes' : 'Save Practice Link'}
-                </button>
+                <div>
+                  <label className="block text-xs font-mono uppercase tracking-wider text-gray-500 mb-1.5">
+                    Link / Problem URL
+                  </label>
+                  <input
+                    type="url"
+                    placeholder="https://leetcode.com/... or GitHub link"
+                    value={formData.url}
+                    onChange={e => setFormData({ ...formData, url: e.target.value })}
+                    className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-gray-900"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-mono uppercase tracking-wider text-gray-500 mb-1.5">
+                    Your Notes / Key Insights
+                  </label>
+                  <textarea
+                    rows={2}
+                    placeholder="Gotchas, time complexity, tips to remember..."
+                    value={formData.notes}
+                    onChange={e => setFormData({ ...formData, notes: e.target.value })}
+                    className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-gray-900"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-mono uppercase tracking-wider text-gray-500 mb-1.5">
+                    Ideal Solution (Markdown / Code)
+                  </label>
+                  <textarea
+                    rows={4}
+                    placeholder="Paste reference SQL query or Python function..."
+                    value={formData.solutionContent}
+                    onChange={e => setFormData({ ...formData, solutionContent: e.target.value })}
+                    className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm font-mono focus:outline-none focus:ring-2 focus:ring-gray-900"
+                  />
+                </div>
+
+                <div className="flex items-center justify-end gap-3 pt-4 border-t border-gray-100">
+                  <button
+                    type="button"
+                    onClick={() => setIsFormOpen(false)}
+                    className="px-4 py-2 text-xs font-mono text-gray-500 hover:text-gray-800"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-6 py-2.5 bg-gray-900 text-white rounded-xl text-xs font-medium hover:bg-black transition-all"
+                  >
+                    {editingId ? 'Save Changes' : 'Create Problem'}
+                  </button>
+                </div>
               </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Backup / Restore JSON Modal */}
+      <AnimatePresence>
+        {isBackupModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-3xl p-6 sm:p-8 max-w-lg w-full shadow-2xl border border-gray-100 space-y-4"
+            >
+              <div className="flex items-center justify-between pb-3 border-b border-gray-100">
+                <h3 className="text-lg font-serif font-bold text-gray-900">Import Practice Backup</h3>
+                <button onClick={() => setIsBackupModalOpen(false)} className="p-1 text-gray-400 hover:text-gray-900">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <p className="text-xs text-gray-500">
+                Paste your exported JSON backup text below to restore or sync your practice progress.
+              </p>
+
+              <textarea
+                rows={8}
+                placeholder="[ { ... } ]"
+                value={backupJsonText}
+                onChange={e => setBackupJsonText(e.target.value)}
+                className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl text-xs font-mono focus:outline-none focus:ring-2 focus:ring-gray-900"
+              />
+
+              <div className="flex items-center justify-end gap-2 pt-3">
+                <button
+                  onClick={() => setIsBackupModalOpen(false)}
+                  className="px-4 py-2 text-xs font-mono text-gray-500"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleConfirmImport}
+                  disabled={!backupJsonText.trim()}
+                  className="px-5 py-2.5 bg-gray-900 disabled:opacity-50 text-white rounded-xl text-xs font-medium hover:bg-black transition-all"
+                >
+                  Confirm Import
+                </button>
+              </div>
             </motion.div>
           </div>
         )}
