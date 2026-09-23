@@ -1,0 +1,86 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "User Profile",
+      "description": "User profile and statistics",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "displayName": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "photoURL": { "type": "string" },
+        "stats": {
+          "type": "object",
+          "properties": {
+            "totalReviews": { "type": "integer" },
+            "streak": { "type": "integer" },
+            "lastActiveDate": { "type": "string", "format": "date-time" }
+          }
+        }
+      },
+      "required": ["uid", "email"]
+    },
+    "PracticeLink": {
+      "title": "Practice Link",
+      "description": "A link or transcript to a practice problem with SRS tracking",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "uid": { "type": "string" },
+        "url": { "type": "string", "format": "uri" },
+        "title": { "type": "string" },
+        "topic": { "type": "string", "enum": ["python", "sql"] },
+        "subTopic": { "type": "string" },
+        "difficulty": { "type": "string", "enum": ["Beginner", "Intermediate", "Advanced"] },
+        "notes": { "type": "string" },
+        "transcript": { "type": "string" },
+        "questionContent": { "type": "string" },
+        "solutionContent": { "type": "string" },
+        "repetitions": { "type": "integer" },
+        "interval": { "type": "integer" },
+        "easinessFactor": { "type": "number" },
+        "nextReviewDate": { "type": "string", "format": "date-time" },
+        "lastReviewDate": { "type": "string", "format": "date-time" },
+        "totalTimeSpent": { "type": "integer" },
+        "lastSolveTime": { "type": "integer" },
+        "averageSolveTime": { "type": "integer" },
+        "totalRepetitions": { "type": "integer" },
+        "personalDifficulty": { "type": "integer" },
+        "priorityScore": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "uid", "title", "topic", "subTopic", "difficulty", "repetitions", "interval", "easinessFactor", "nextReviewDate", "createdAt", "totalTimeSpent", "lastSolveTime", "averageSolveTime", "totalRepetitions", "personalDifficulty", "priorityScore"]
+    },
+    "Submission": {
+      "title": "Tutoring Submission",
+      "description": "A recording and AI grading for a practice problem",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "linkId": { "type": "string" },
+        "uid": { "type": "string" },
+        "audioData": { "type": "string" },
+        "transcript": { "type": "string" },
+        "feedback": { "type": "string" },
+        "grade": { "type": "integer" },
+        "status": { "type": "string", "enum": ["pending", "graded"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["linkId", "uid", "status", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{uid}": {
+      "schema": "UserProfile",
+      "description": "User profile documents"
+    },
+    "/practiceLinks/{linkId}": {
+      "schema": "PracticeLink",
+      "description": "Practice links for all users"
+    },
+    "/submissions/{submissionId}": {
+      "schema": "Submission",
+      "description": "Audio submissions and AI feedback"
+    }
+  }
+}

@@ -1,0 +1,151 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: {uid}
+    // Fields:
+    //   - uid: string (required)
+    //   - displayName: string
+    //   - email: string (required, email format)
+    //   - photoURL: string
+    //   - stats: map (totalReviews: int, streak: int, lastActiveDate: string)
+    //
+    // Collection: practiceLinks
+    // Document ID: {linkId}
+    // Fields:
+    //   - id: string (required)
+    //   - uid: string (required, owner)
+    //   - url: string (required, uri)
+    //   - title: string (required)
+    //   - topic: string (required, enum: ['python', 'sql'])
+    //   - subTopic: string (required)
+    //   - difficulty: string (required, enum: ['Beginner', 'Intermediate', 'Advanced'])
+    //   - notes: string
+    //   - repetitions: int (required)
+    //   - interval: int (required)
+    //   - easinessFactor: float (required)
+    //   - nextReviewDate: string (required, ISO)
+    //   - lastReviewDate: string (ISO)
+    //   - createdAt: string (required, ISO)
+    //
+    // Collection: submissions
+    // Document ID: {submissionId}
+    // Fields:
+    //   - id: string (required)
+    //   - linkId: string (required)
+    //   - uid: string (required, owner)
+    //   - audioData: string (base64)
+    //   - transcript: string
+    //   - feedback: string
+    //   - grade: int (1-5)
+    //   - status: string (enum: ['pending', 'graded'])
+    //   - createdAt: string (required, ISO)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    function isDocOwner() {
+      return isAuthenticated() && request.auth.uid == resource.data.uid;
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function isValidDateString(dateStr) {
+      return dateStr is string && dateStr.matches("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}.*Z?$");
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'email']) &&
+             data.uid == request.auth.uid &&
+             isValidEmail(data.email) &&
+             (!('displayName' in data) || data.displayName is string) &&
+             (!('photoURL' in data) || data.photoURL is string);
+    }
+
+    function isValidLink(data) {
+      return data.keys().hasAll(['id', 'uid', 'title', 'topic', 'subTopic', 'difficulty', 'repetitions', 'interval', 'easinessFactor', 'nextReviewDate', 'createdAt', 'totalTimeSpent', 'lastSolveTime', 'averageSolveTime', 'totalRepetitions', 'personalDifficulty', 'priorityScore']) &&
+             data.uid == request.auth.uid &&
+             (!('url' in data) || (data.url is string && data.url.matches("^https?://.*"))) &&
+             data.title is string && data.title.size() > 0 && data.title.size() < 200 &&
+             data.topic in ['python', 'sql'] &&
+             data.difficulty in ['Beginner', 'Intermediate', 'Advanced'] &&
+             data.subTopic is string && data.subTopic.size() >= 0 && data.subTopic.size() < 100 &&
+             (!('transcript' in data) || (data.transcript is string && data.transcript.size() < 10000)) &&
+             (!('questionContent' in data) || (data.questionContent is string && data.questionContent.size() < 10000)) &&
+             (!('solutionContent' in data) || (data.solutionContent is string && data.solutionContent.size() < 10000)) &&
+             data.repetitions is int && data.repetitions >= 0 &&
+             data.interval is int && data.interval >= 0 &&
+             data.easinessFactor is number && data.easinessFactor >= 1.3 &&
+             data.totalTimeSpent is int && data.totalTimeSpent >= 0 &&
+             data.lastSolveTime is int && data.lastSolveTime >= 0 &&
+             data.averageSolveTime is int && data.averageSolveTime >= 0 &&
+             data.totalRepetitions is int && data.totalRepetitions >= 0 &&
+             data.personalDifficulty is int && data.personalDifficulty >= 1 && data.personalDifficulty <= 10 &&
+             data.priorityScore is int &&
+             isValidDateString(data.nextReviewDate) &&
+             isValidDateString(data.createdAt);
+    }
+
+    function isValidSubmission(data) {
+      return data.keys().hasAll(['linkId', 'uid', 'status', 'createdAt']) &&
+             data.uid == request.auth.uid &&
+             data.linkId is string &&
+             data.status in ['pending', 'graded'] &&
+             isValidDateString(data.createdAt) &&
+             (!('audioData' in data) || data.audioData is string) &&
+             (!('transcript' in data) || data.transcript is string) &&
+             (!('feedback' in data) || data.feedback is string) &&
+             (!('grade' in data) || (data.grade is int && data.grade >= 1 && data.grade <= 5));
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{uid} {
+      allow read: if isOwner(uid);
+      allow create: if isOwner(uid) && isValidUser(request.resource.data);
+      allow update: if isOwner(uid) && isValidUser(request.resource.data);
+      allow delete: if false; // Profiles shouldn't be deleted easily
+    }
+
+    match /practiceLinks/{linkId} {
+      allow read: if isAuthenticated() && (resource == null || resource.data.uid == request.auth.uid);
+      allow create: if isAuthenticated() && request.resource.data.uid == request.auth.uid && isValidLink(request.resource.data);
+      allow update: if isDocOwner() && isValidLink(request.resource.data);
+      allow delete: if isDocOwner();
+    }
+
+    match /submissions/{submissionId} {
+      allow read: if isAuthenticated() && (resource == null || resource.data.uid == request.auth.uid);
+      allow create: if isAuthenticated() && request.resource.data.uid == request.auth.uid && isValidSubmission(request.resource.data);
+      allow update: if isDocOwner() && isValidSubmission(request.resource.data);
+      allow delete: if isDocOwner();
+    }
+    
+    match /test/connection {
+      allow read: if true;
+    }
+  }
+}

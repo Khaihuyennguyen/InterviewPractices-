@@ -1,0 +1,5 @@
+{
+  "name": "CodeRecall: Practice Link & SRS Ranking",
+  "description": "A smart practice link management system using the SM-2 spaced repetition algorithm. Store links to Python and SQL problems, practice them, and get ranked suggestions on what to review next based on your performance ratings.",
+  "requestFramePermissions": ["microphone"]
+}
