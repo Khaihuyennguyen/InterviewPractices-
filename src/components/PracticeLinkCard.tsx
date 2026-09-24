@@ -58,6 +58,11 @@ export const PracticeLinkCard: React.FC<PracticeLinkCardProps> = ({ link, onRate
         <div className="flex flex-col gap-4">
           <div className="flex items-center justify-between flex-wrap gap-2">
             <div className="flex items-center gap-2">
+              {typeof link.problemNumber === 'number' && (
+                <span className="px-2.5 py-1 text-[11px] font-mono font-bold rounded-lg border bg-gray-900 text-white">
+                  #{link.problemNumber}
+                </span>
+              )}
               <span className={cn(
                 "px-2.5 py-1 text-[11px] font-mono font-bold uppercase tracking-wider rounded-lg border",
                 getTopicBadgeClass(link.topic)
@@ -85,7 +90,7 @@ export const PracticeLinkCard: React.FC<PracticeLinkCardProps> = ({ link, onRate
           </div>
 
           <h2 className="text-2xl md:text-3xl font-serif font-medium text-gray-900 leading-tight">
-            {link.title}
+            {typeof link.problemNumber === 'number' ? `#${link.problemNumber}. ` : ''}{link.title}
           </h2>
 
           {link.notes && (

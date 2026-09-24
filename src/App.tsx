@@ -25,7 +25,8 @@ import { differenceInDays, differenceInCalendarDays, parseISO, format, addDays, 
 
 export interface GoalSettings {
   targetDate: string; // YYYY-MM-DD
-  targetCount: number;
+  targetProblemsCount: number; // e.g. 1000
+  targetPracticesCount: number; // e.g. 100000
 }
 
 const GOAL_STORAGE_KEY = 'coderecall_target_goal_v1';
@@ -35,12 +36,17 @@ function getInitialGoal(): GoalSettings {
     const saved = localStorage.getItem(GOAL_STORAGE_KEY);
     if (saved) {
       const parsed = JSON.parse(saved);
-      if (parsed.targetDate && parsed.targetCount) return parsed;
+      return {
+        targetDate: parsed.targetDate || `${new Date().getFullYear()}-12-31`,
+        targetProblemsCount: parsed.targetProblemsCount || parsed.targetCount || 1000,
+        targetPracticesCount: parsed.targetPracticesCount || 100000,
+      };
     }
   } catch (e) {}
   return {
     targetDate: `${new Date().getFullYear()}-12-31`,
-    targetCount: 1000,
+    targetProblemsCount: 1000,
+    targetPracticesCount: 100000,
   };
 }
 
@@ -53,11 +59,12 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [onlyDue, setOnlyDue] = useState(false);
 
-  // Goal & Countdown State
+  // Goal & Countdown State (1,000 problems & 100,000 practices)
   const [goalSettings, setGoalSettings] = useState<GoalSettings>(getInitialGoal);
   const [isGoalModalOpen, setIsGoalModalOpen] = useState(false);
   const [tempGoalDate, setTempGoalDate] = useState(goalSettings.targetDate);
-  const [tempGoalCount, setTempGoalCount] = useState(goalSettings.targetCount.toString());
+  const [tempGoalProblemsCount, setTempGoalProblemsCount] = useState(goalSettings.targetProblemsCount.toString());
+  const [tempGoalPracticesCount, setTempGoalPracticesCount] = useState(goalSettings.targetPracticesCount.toString());
 
   // Practice session state
   const [isPracticing, setIsPracticing] = useState(false);
@@ -98,28 +105,44 @@ export default function App() {
     saveLocalProblems(links);
   }, [links]);
 
-  // Target Deadline & Pace Calculation
+  // Target Deadline & Dual Pace Calculation (Problems + Practices)
   const deadlineInfo = useMemo(() => {
     const now = getNowInTZ();
     const target = new Date(`${goalSettings.targetDate}T23:59:59`);
     const daysRemaining = Math.max(0, differenceInCalendarDays(target, now));
-    const targetCount = goalSettings.targetCount;
-    const solvedCount = links.length;
-    const remainingProblems = Math.max(0, targetCount - solvedCount);
-    const dailyPace = daysRemaining > 0 ? Math.ceil(remainingProblems / daysRemaining) : remainingProblems;
-    const progressPercent = Math.min(100, Math.round((solvedCount / targetCount) * 100));
+    
+    // Problems Goal (default 1,000)
+    const targetProblems = goalSettings.targetProblemsCount || 1000;
+    const currentProblems = links.length;
+    const remainingProblems = Math.max(0, targetProblems - currentProblems);
+    const dailyProblemsPace = daysRemaining > 0 ? Math.ceil(remainingProblems / daysRemaining) : remainingProblems;
+    const problemsProgressPercent = Math.min(100, Math.round((currentProblems / targetProblems) * 100));
+
+    // Practices Goal (default 100,000)
+    const targetPractices = goalSettings.targetPracticesCount || 100000;
+    const totalPracticesFromLinks = links.reduce((acc, curr) => acc + (curr.totalRepetitions || 0), 0);
+    const totalPracticesFromHistory = practiceHistory.length;
+    const currentPractices = Math.max(totalPracticesFromLinks, totalPracticesFromHistory);
+    const remainingPractices = Math.max(0, targetPractices - currentPractices);
+    const dailyPracticesPace = daysRemaining > 0 ? Math.ceil(remainingPractices / daysRemaining) : remainingPractices;
+    const practicesProgressPercent = Math.min(100, Math.round((currentPractices / targetPractices) * 100));
 
     return {
       deadlineDate: target,
       formattedDate: format(target, 'MMM d, yyyy'),
       daysRemaining,
-      targetCount,
-      solvedCount,
+      targetProblems,
+      currentProblems,
       remainingProblems,
-      dailyPace,
-      progressPercent,
+      dailyProblemsPace,
+      problemsProgressPercent,
+      targetPractices,
+      currentPractices,
+      remainingPractices,
+      dailyPracticesPace,
+      practicesProgressPercent,
     };
-  }, [goalSettings, links.length]);
+  }, [goalSettings, links, practiceHistory]);
 
   // Screen-specific due item counts for navigation badges
   const pythonDueCount = useMemo(() => {
@@ -528,9 +551,12 @@ export default function App() {
       }));
     } else {
       const newId = `prob-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+      const maxProblemNumber = links.reduce((max, l) => Math.max(max, l.problemNumber || 0), 0);
+      const newProblemNumber = maxProblemNumber + 1;
       const newItem: PracticeLink = {
         id: newId,
         uid: 'guest_user',
+        problemNumber: newProblemNumber,
         title: formData.title,
         url: formData.url,
         topic: effectiveTopic,
@@ -790,26 +816,27 @@ export default function App() {
         {/* Top Hero: Deadline Countdown & Smart Recommendation */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           
-          {/* Target Deadline & Problem Count Goal Card */}
+          {/* Target Deadline & Dual Goal Card (1,000 Problems & 100,000 Practices) */}
           <div className="bg-gradient-to-br from-gray-900 to-gray-800 text-white rounded-3xl p-6 shadow-md flex flex-col justify-between relative overflow-hidden">
             <div className="absolute right-0 top-0 translate-x-4 -translate-y-4 w-36 h-36 bg-blue-500/10 rounded-full blur-2xl pointer-events-none" />
             <div>
               <div className="flex items-center justify-between mb-4">
                 <span className="px-3 py-1 bg-white/10 rounded-full text-[10px] font-mono font-semibold uppercase tracking-wider text-blue-200 flex items-center gap-1.5">
                   <Target className="w-3.5 h-3.5 text-blue-400" />
-                  Interview Goal
+                  Interview Goals
                 </span>
                 <button
                   onClick={() => {
                     setTempGoalDate(goalSettings.targetDate);
-                    setTempGoalCount(goalSettings.targetCount.toString());
+                    setTempGoalProblemsCount(goalSettings.targetProblemsCount.toString());
+                    setTempGoalPracticesCount(goalSettings.targetPracticesCount.toString());
                     setIsGoalModalOpen(true);
                   }}
-                  className="px-2.5 py-1 bg-white/10 hover:bg-white/20 rounded-lg text-[11px] font-mono text-gray-300 hover:text-white transition-colors flex items-center gap-1.5"
-                  title="Customize Target Deadline & Problems Count"
+                  className="px-2.5 py-1 bg-white/10 hover:bg-white/20 rounded-lg text-[11px] font-mono text-gray-300 hover:text-white transition-colors flex items-center gap-1.5 cursor-pointer"
+                  title="Customize Target Deadline, Problems Count & Practices Goal"
                 >
                   <Pencil className="w-3 h-3" />
-                  <span>Edit Goal</span>
+                  <span>Edit Goals</span>
                 </button>
               </div>
 
@@ -825,28 +852,55 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Progress towards target count */}
-              <div className="mt-5 space-y-2">
-                <div className="flex items-center justify-between text-xs font-mono">
-                  <span className="text-gray-300">
-                    <strong className="text-white font-bold">{deadlineInfo.solvedCount}</strong> / {deadlineInfo.targetCount} problems
-                  </span>
-                  <span className="text-emerald-400 font-bold">{deadlineInfo.progressPercent}%</span>
+              {/* Dual Progress: 1,000 Problems & 100,000 Practices */}
+              <div className="mt-5 space-y-3">
+                {/* 1. Problems Goal (1,000) */}
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-xs font-mono">
+                    <span className="text-gray-300 flex items-center gap-1">
+                      <Code2 className="w-3.5 h-3.5 text-blue-400 flex-shrink-0" />
+                      <span>Problems:</span>
+                      <strong className="text-white font-bold">{deadlineInfo.currentProblems}</strong> / {deadlineInfo.targetProblems.toLocaleString()}
+                    </span>
+                    <span className="text-blue-300 font-bold">{deadlineInfo.problemsProgressPercent}%</span>
+                  </div>
+                  <div className="w-full h-1.5 bg-white/10 rounded-full overflow-hidden">
+                    <div 
+                      className="h-full bg-blue-400 rounded-full transition-all duration-500" 
+                      style={{ width: `${Math.max(deadlineInfo.problemsProgressPercent, 1)}%` }}
+                    />
+                  </div>
                 </div>
-                <div className="w-full h-2 bg-white/10 rounded-full overflow-hidden">
-                  <div 
-                    className="h-full bg-gradient-to-r from-blue-400 to-emerald-400 rounded-full transition-all duration-500" 
-                    style={{ width: `${deadlineInfo.progressPercent}%` }}
-                  />
+
+                {/* 2. Practice Repetitions Goal (100,000) */}
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-xs font-mono">
+                    <span className="text-gray-300 flex items-center gap-1">
+                      <Flame className="w-3.5 h-3.5 text-amber-400 flex-shrink-0" />
+                      <span>Practices:</span>
+                      <strong className="text-white font-bold">{deadlineInfo.currentPractices.toLocaleString()}</strong> / {deadlineInfo.targetPractices.toLocaleString()}
+                    </span>
+                    <span className="text-emerald-400 font-bold">{deadlineInfo.practicesProgressPercent}%</span>
+                  </div>
+                  <div className="w-full h-1.5 bg-white/10 rounded-full overflow-hidden">
+                    <div 
+                      className="h-full bg-gradient-to-r from-amber-400 to-emerald-400 rounded-full transition-all duration-500" 
+                      style={{ width: `${Math.max(deadlineInfo.practicesProgressPercent, 1)}%` }}
+                    />
+                  </div>
                 </div>
               </div>
             </div>
 
-            <div className="mt-5 pt-4 border-t border-white/10 flex items-center justify-between text-xs font-mono text-gray-300">
-              <span>Required Pace:</span>
-              <span className="px-2 py-0.5 bg-emerald-500/20 text-emerald-300 rounded font-bold">
-                ~{deadlineInfo.dailyPace} problems / day
-              </span>
+            <div className="mt-4 pt-3 border-t border-white/10 grid grid-cols-2 gap-2 text-[11px] font-mono text-gray-300">
+              <div>
+                <span className="text-gray-400 block text-[10px]">Problems Pace:</span>
+                <span className="text-blue-300 font-bold">~{deadlineInfo.dailyProblemsPace}/day</span>
+              </div>
+              <div>
+                <span className="text-gray-400 block text-[10px]">Practices Pace:</span>
+                <span className="text-emerald-300 font-bold">~{deadlineInfo.dailyPracticesPace}/day</span>
+              </div>
             </div>
           </div>
 
@@ -878,6 +932,11 @@ export default function App() {
 
                 <div>
                   <div className="flex items-center gap-2 mb-1 flex-wrap">
+                    {typeof topRecommendation.item.problemNumber === 'number' && (
+                      <span className="px-2 py-0.5 text-[10px] font-mono font-bold rounded border bg-gray-900 text-white">
+                        #{topRecommendation.item.problemNumber}
+                      </span>
+                    )}
                     <span className={cn(
                       "px-2 py-0.5 text-[10px] font-mono font-bold uppercase rounded border",
                       getTopicBadgeClass(topRecommendation.item.topic)
@@ -893,7 +952,7 @@ export default function App() {
                     </span>
                   </div>
                   <h3 className="text-xl font-serif font-bold text-gray-900">
-                    {topRecommendation.item.title}
+                    {typeof topRecommendation.item.problemNumber === 'number' ? `#${topRecommendation.item.problemNumber}. ` : ''}{topRecommendation.item.title}
                   </h3>
                   <p className="text-xs text-gray-500 mt-1 italic">
                     Why: {topRecommendation.reason}
@@ -1087,6 +1146,7 @@ export default function App() {
               <table className="w-full text-left border-collapse">
                 <thead>
                   <tr className="border-b border-gray-100 text-[10px] font-mono uppercase tracking-wider text-gray-400">
+                    <th className="px-4 py-4 text-center w-14">#</th>
                     <th className="px-6 py-4">Action</th>
                     <th className="px-6 py-4">Problem</th>
                     <th className="px-6 py-4">Topic & Area</th>
@@ -1101,6 +1161,13 @@ export default function App() {
                     const itemIsDue = isDue(item);
                     return (
                       <tr key={item.id} className="hover:bg-gray-50/70 transition-colors group">
+                        {/* Problem Number */}
+                        <td className="px-4 py-4 text-center font-mono font-bold text-xs text-gray-600">
+                          <span className="px-2 py-1 bg-gray-100 group-hover:bg-gray-200 rounded-lg transition-colors border border-gray-200/60">
+                            #{item.problemNumber || 0}
+                          </span>
+                        </td>
+
                         {/* Practice Button */}
                         <td className="px-6 py-4">
                           <div className="flex items-center gap-1.5">
@@ -1709,7 +1776,7 @@ export default function App() {
                   <div className="w-8 h-8 bg-blue-50 text-blue-600 rounded-xl flex items-center justify-center">
                     <Target className="w-4 h-4" />
                   </div>
-                  <h3 className="text-lg font-serif font-bold text-gray-900">Customize Target Goal</h3>
+                  <h3 className="text-lg font-serif font-bold text-gray-900">Customize Target Goals</h3>
                 </div>
                 <button onClick={() => setIsGoalModalOpen(false)} className="p-1 text-gray-400 hover:text-gray-900 rounded-lg">
                   <X className="w-5 h-5" />
@@ -1734,18 +1801,35 @@ export default function App() {
 
                 <div>
                   <label className="block text-xs font-mono uppercase tracking-wider text-gray-500 mb-1.5">
-                    Target Problem Count
+                    Target Problems Count
                   </label>
                   <input
                     type="number"
                     min="1"
-                    max="10000"
-                    value={tempGoalCount}
-                    onChange={e => setTempGoalCount(e.target.value)}
+                    max="100000"
+                    value={tempGoalProblemsCount}
+                    onChange={e => setTempGoalProblemsCount(e.target.value)}
                     className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm font-mono focus:outline-none focus:ring-2 focus:ring-gray-900"
                   />
                   <p className="text-[11px] text-gray-400 mt-1">
-                    Number of problems you want to practice & master (e.g., 1000).
+                    Unique problems to solve & track in your catalog (e.g., 1,000).
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-mono uppercase tracking-wider text-gray-500 mb-1.5">
+                    Target Practices Goal (Repetitions)
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="10000000"
+                    value={tempGoalPracticesCount}
+                    onChange={e => setTempGoalPracticesCount(e.target.value)}
+                    className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm font-mono focus:outline-none focus:ring-2 focus:ring-gray-900"
+                  />
+                  <p className="text-[11px] text-gray-400 mt-1">
+                    Total cumulative practice reps across all problems (e.g., 100,000).
                   </p>
                 </div>
               </div>
@@ -1761,10 +1845,12 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => {
-                    const count = Math.max(1, parseInt(tempGoalCount) || 1000);
+                    const problemsCount = Math.max(1, parseInt(tempGoalProblemsCount) || 1000);
+                    const practicesCount = Math.max(1, parseInt(tempGoalPracticesCount) || 100000);
                     const newGoal: GoalSettings = {
                       targetDate: tempGoalDate || `${new Date().getFullYear()}-12-31`,
-                      targetCount: count,
+                      targetProblemsCount: problemsCount,
+                      targetPracticesCount: practicesCount,
                     };
                     setGoalSettings(newGoal);
                     try {
@@ -1772,9 +1858,9 @@ export default function App() {
                     } catch (e) {}
                     setIsGoalModalOpen(false);
                   }}
-                  className="px-5 py-2.5 bg-gray-900 text-white rounded-xl text-xs font-medium hover:bg-black transition-all"
+                  className="px-5 py-2.5 bg-gray-900 text-white rounded-xl text-xs font-medium hover:bg-black transition-all cursor-pointer"
                 >
-                  Save Goal
+                  Save Goals
                 </button>
               </div>
             </motion.div>

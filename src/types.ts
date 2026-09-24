@@ -9,6 +9,7 @@ export interface PracticeLink {
   topic: Topic;
   subTopic: string;
   pattern?: string; // Standard pattern e.g. 'Two Pointers', 'Cyclic Sort', 'Window Functions'
+  problemNumber?: number; // Number of the problem (e.g. 1, 2, 3...)
   difficulty: Difficulty;
   notes?: string;
   transcript?: string;

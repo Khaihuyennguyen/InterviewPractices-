@@ -11,20 +11,38 @@ export function getInitialProblems(): PracticeLink[] {
     if (saved) {
       const parsed = JSON.parse(saved) as PracticeLink[];
       if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed.map(item => ({
-          ...item,
-          priorityScore: calculatePriorityScore(item)
-        }));
+        let maxNum = 0;
+        parsed.forEach(item => {
+          if (typeof item.problemNumber === 'number' && item.problemNumber > maxNum) {
+            maxNum = item.problemNumber;
+          }
+        });
+
+        const withNumbers = parsed.map((item, index) => {
+          let num = item.problemNumber;
+          if (typeof num !== 'number' || num <= 0) {
+            maxNum += 1;
+            num = maxNum;
+          }
+          return {
+            ...item,
+            problemNumber: num,
+            priorityScore: calculatePriorityScore(item)
+          };
+        });
+        saveLocalProblems(withNumbers);
+        return withNumbers;
       }
     }
   } catch (err) {
     console.error('Failed to load problems from local storage:', err);
   }
 
-  // Fallback to starter problems with updated priority
-  const starters: PracticeLink[] = STARTER_PROBLEMS.map(p => {
+  // Fallback to starter problems with updated priority and problem numbers
+  const starters: PracticeLink[] = STARTER_PROBLEMS.map((p, index) => {
     const fullItem: PracticeLink = {
       ...p,
+      problemNumber: index + 1,
       uid: GUEST_UID,
     };
     return {
@@ -45,9 +63,10 @@ export function saveLocalProblems(problems: PracticeLink[]): void {
 }
 
 export function resetToStarterProblems(): PracticeLink[] {
-  const starters: PracticeLink[] = STARTER_PROBLEMS.map(p => {
+  const starters: PracticeLink[] = STARTER_PROBLEMS.map((p, index) => {
     const fullItem: PracticeLink = {
       ...p,
+      problemNumber: index + 1,
       uid: GUEST_UID,
     };
     return {
@@ -78,6 +97,8 @@ export function importProblemsJSON(jsonStr: string): PracticeLink[] {
       title: item.title,
       topic: item.topic || 'general',
       subTopic: item.subTopic || 'General',
+      pattern: item.pattern || item.subTopic || 'General',
+      problemNumber: typeof item.problemNumber === 'number' && item.problemNumber > 0 ? item.problemNumber : idx + 1,
       difficulty: item.difficulty || 'Intermediate',
       url: item.url || '',
       notes: item.notes || '',
