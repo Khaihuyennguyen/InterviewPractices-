@@ -7,10 +7,10 @@ import { motion, AnimatePresence } from 'motion/react';
 import { 
   Plus, Sparkles, Database, Code2, CheckCircle2, BarChart3, Clock, 
   Filter, ExternalLink, Trash2, X, AlertCircle, RotateCcw, Pencil, 
-  Play, Download, Upload, Target, Flame, Search, ArrowRight, BookOpen, Layers
+  Play, Download, Upload, Target, Flame, Search, ArrowRight, BookOpen, Layers, Calendar
 } from 'lucide-react';
 import { cn, formatTopicName, getTopicBadgeClass } from './lib/utils';
-import { differenceInDays, differenceInCalendarDays, parseISO, format } from 'date-fns';
+import { differenceInDays, differenceInCalendarDays, parseISO, format, addDays, startOfDay } from 'date-fns';
 
 export interface GoalSettings {
   targetDate: string; // YYYY-MM-DD
@@ -68,6 +68,12 @@ export default function App() {
     subTopic: '',
     difficulty: 'Intermediate' as Difficulty,
     personalDifficulty: 5,
+    alreadyPracticed: true, // Default: user just practiced this problem today!
+    lastPracticeDate: format(getNowInTZ(), 'yyyy-MM-dd'),
+    nextReviewDate: format(addDays(getNowInTZ(), 1), 'yyyy-MM-dd'),
+    initialSolveTimeMins: '15',
+    initialSolveTimeSecs: '0',
+    totalRepetitions: 1,
     notes: '',
     questionContent: '',
     solutionContent: '',
@@ -156,6 +162,7 @@ export default function App() {
       const topDue = dueItems[0];
       return {
         item: topDue,
+        allCaughtUp: false,
         reason: topDue.totalRepetitions === 0 
           ? 'New problem — ready for your initial practice!' 
           : 'Spaced review is due to retain this concept long-term.'
@@ -167,13 +174,25 @@ export default function App() {
     if (unpracticed) {
       return {
         item: unpracticed,
+        allCaughtUp: false,
         reason: 'Recommended new topic to expand your interview syllabus.'
+      };
+    }
+
+    // Check if everything was already reviewed recently (<16h)
+    const allRecent = sortedLinks.length > 0 && sortedLinks.every(l => (l.priorityScore || 0) <= -1000000);
+    if (allRecent) {
+      return {
+        item: sortedLinks[0],
+        allCaughtUp: true,
+        reason: 'All caught up for today! 🎉 You completed your practice. All items are scheduled for future review.'
       };
     }
 
     // Fallback: highest priority item overall
     return {
       item: sortedLinks[0],
+      allCaughtUp: false,
       reason: 'Recommended for extra reinforcement.'
     };
   }, [links, dueItems, sortedLinks]);
@@ -248,6 +267,8 @@ export default function App() {
 
   // Open add modal
   const handleOpenAdd = () => {
+    const todayStr = format(getNowInTZ(), 'yyyy-MM-dd');
+    const tomorrowStr = format(addDays(getNowInTZ(), 1), 'yyyy-MM-dd');
     setEditingId(null);
     setFormData({
       title: '',
@@ -257,6 +278,12 @@ export default function App() {
       subTopic: '',
       difficulty: 'Intermediate',
       personalDifficulty: 5,
+      alreadyPracticed: true, // Default to true so newly solved problems don't get re-prompted today
+      lastPracticeDate: todayStr,
+      nextReviewDate: tomorrowStr,
+      initialSolveTimeMins: '15',
+      initialSolveTimeSecs: '0',
+      totalRepetitions: 1,
       notes: '',
       questionContent: '',
       solutionContent: '',
@@ -269,6 +296,13 @@ export default function App() {
     setEditingId(item.id);
     const standardTopics = ['sql', 'python', 'system-design', 'qa', 'algorithms', 'data-engineering'];
     const isStandard = standardTopics.includes(item.topic.toLowerCase().trim());
+    const lastDate = item.lastReviewDate 
+      ? formatDateInTZ(item.lastReviewDate, 'yyyy-MM-dd') 
+      : format(getNowInTZ(), 'yyyy-MM-dd');
+    const nextDate = item.nextReviewDate 
+      ? formatDateInTZ(item.nextReviewDate, 'yyyy-MM-dd') 
+      : format(addDays(getNowInTZ(), 1), 'yyyy-MM-dd');
+
     setFormData({
       title: item.title,
       url: item.url || '',
@@ -277,6 +311,12 @@ export default function App() {
       subTopic: item.subTopic || '',
       difficulty: item.difficulty,
       personalDifficulty: item.personalDifficulty || 5,
+      alreadyPracticed: Boolean(item.lastReviewDate && item.totalRepetitions > 0),
+      lastPracticeDate: lastDate,
+      nextReviewDate: nextDate,
+      initialSolveTimeMins: Math.floor((item.lastSolveTime || 0) / 60).toString(),
+      initialSolveTimeSecs: ((item.lastSolveTime || 0) % 60).toString(),
+      totalRepetitions: item.totalRepetitions || 1,
       notes: item.notes || '',
       questionContent: item.questionContent || '',
       solutionContent: item.solutionContent || '',
@@ -298,6 +338,26 @@ export default function App() {
 
     const now = getNowInTZ();
     const nowIso = now.toISOString();
+    const solveTimeSeconds = (parseInt(formData.initialSolveTimeMins) || 0) * 60 + (parseInt(formData.initialSolveTimeSecs) || 0);
+
+    // Compute lastReviewDate and nextReviewDate
+    let lastReviewDate: string | undefined = undefined;
+    let nextReviewDateIso: string = nowIso;
+    let repetitions = 0;
+    let totalRepetitions = 0;
+    let interval = 0;
+
+    if (formData.alreadyPracticed) {
+      lastReviewDate = parseDateInTZ(formData.lastPracticeDate || format(now, 'yyyy-MM-dd'));
+      if (formData.nextReviewDate) {
+        nextReviewDateIso = parseDateInTZ(formData.nextReviewDate);
+      } else {
+        nextReviewDateIso = addDays(startOfDay(now), 1).toISOString();
+      }
+      repetitions = Math.max(1, formData.totalRepetitions || 1);
+      totalRepetitions = Math.max(1, formData.totalRepetitions || 1);
+      interval = Math.max(1, differenceInCalendarDays(new Date(nextReviewDateIso), new Date(lastReviewDate)));
+    }
 
     if (editingId) {
       setLinks(prev => prev.map(item => {
@@ -313,6 +373,22 @@ export default function App() {
             notes: formData.notes,
             questionContent: formData.questionContent,
             solutionContent: formData.solutionContent,
+            lastReviewDate: formData.alreadyPracticed 
+              ? (formData.lastPracticeDate ? parseDateInTZ(formData.lastPracticeDate) : item.lastReviewDate) 
+              : undefined,
+            nextReviewDate: formData.nextReviewDate 
+              ? parseDateInTZ(formData.nextReviewDate) 
+              : item.nextReviewDate,
+            lastSolveTime: solveTimeSeconds > 0 ? solveTimeSeconds : item.lastSolveTime,
+            totalRepetitions: formData.alreadyPracticed 
+              ? Math.max(1, formData.totalRepetitions || item.totalRepetitions) 
+              : 0,
+            repetitions: formData.alreadyPracticed 
+              ? Math.max(1, repetitions || item.repetitions) 
+              : 0,
+            interval: formData.alreadyPracticed 
+              ? Math.max(1, interval || item.interval) 
+              : 0,
           };
           return {
             ...updated,
@@ -335,14 +411,15 @@ export default function App() {
         notes: formData.notes,
         questionContent: formData.questionContent,
         solutionContent: formData.solutionContent,
-        repetitions: 0,
-        interval: 0,
+        repetitions,
+        interval,
         easinessFactor: 2.5,
-        nextReviewDate: nowIso,
-        totalTimeSpent: 0,
-        lastSolveTime: 0,
-        averageSolveTime: 0,
-        totalRepetitions: 0,
+        lastReviewDate,
+        nextReviewDate: nextReviewDateIso,
+        totalTimeSpent: solveTimeSeconds,
+        lastSolveTime: solveTimeSeconds,
+        averageSolveTime: solveTimeSeconds,
+        totalRepetitions,
         priorityScore: 0,
         createdAt: nowIso,
       };
@@ -591,15 +668,23 @@ export default function App() {
               <div className="space-y-4">
                 <div className="flex items-center justify-between flex-wrap gap-2">
                   <div className="flex items-center gap-2">
-                    <span className="p-1.5 bg-amber-50 text-amber-600 rounded-xl">
-                      <Sparkles className="w-4 h-4" />
+                    <span className={cn(
+                      "p-1.5 rounded-xl",
+                      topRecommendation.allCaughtUp ? "bg-emerald-50 text-emerald-600" : "bg-amber-50 text-amber-600"
+                    )}>
+                      {topRecommendation.allCaughtUp ? <CheckCircle2 className="w-4 h-4" /> : <Sparkles className="w-4 h-4" />}
                     </span>
-                    <span className="text-xs font-mono font-bold uppercase tracking-wider text-amber-700">
-                      Recommended Next Problem
+                    <span className={cn(
+                      "text-xs font-mono font-bold uppercase tracking-wider",
+                      topRecommendation.allCaughtUp ? "text-emerald-700" : "text-amber-700"
+                    )}>
+                      {topRecommendation.allCaughtUp ? 'All Caught Up Today' : 'Recommended Next Problem'}
                     </span>
                   </div>
                   <span className="text-[11px] font-mono text-gray-400 bg-gray-50 px-2.5 py-1 rounded-full">
-                    Priority Score: {topRecommendation.item.priorityScore}
+                    {topRecommendation.allCaughtUp 
+                      ? `Next Review: ${formatDateInTZ(topRecommendation.item.nextReviewDate, 'MMM d')}`
+                      : `Priority Score: ${topRecommendation.item.priorityScore}`}
                   </span>
                 </div>
 
@@ -630,10 +715,15 @@ export default function App() {
                 <div className="flex items-center gap-3 pt-2">
                   <button
                     onClick={() => handleStartPractice(topRecommendation.item)}
-                    className="px-6 py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl font-medium text-sm transition-all flex items-center gap-2 shadow-md shadow-emerald-100 group"
+                    className={cn(
+                      "px-6 py-3 rounded-2xl font-medium text-sm transition-all flex items-center gap-2 shadow-md group",
+                      topRecommendation.allCaughtUp
+                        ? "bg-gray-900 hover:bg-black text-white shadow-gray-200"
+                        : "bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-100"
+                    )}
                   >
                     <Play className="w-4 h-4 fill-current group-hover:scale-110 transition-transform" />
-                    <span>Start Recommended Practice</span>
+                    <span>{topRecommendation.allCaughtUp ? 'Practice Ahead (Optional)' : 'Start Recommended Practice'}</span>
                   </button>
                   {topRecommendation.item.url && (
                     <a
@@ -952,14 +1042,16 @@ export default function App() {
                             <div className="flex items-center gap-1.5">
                               <span className={cn(
                                 "w-2 h-2 rounded-full",
-                                itemIsDue ? "bg-amber-500 animate-pulse" : "bg-gray-300"
+                                itemIsDue ? "bg-amber-500 animate-pulse" : "bg-emerald-500"
                               )} />
-                              <span className={cn("text-xs", itemIsDue ? "font-bold text-amber-700" : "text-gray-500")}>
-                                {itemIsDue ? 'Due Now' : formatDateInTZ(item.nextReviewDate, 'MMM d')}
+                              <span className={cn("text-xs", itemIsDue ? "font-bold text-amber-700" : "text-gray-700")}>
+                                {itemIsDue ? 'Due Now' : `Next: ${formatDateInTZ(item.nextReviewDate, 'MMM d')}`}
                               </span>
                             </div>
                             <span className="text-[10px] text-gray-400">
-                              {item.lastReviewDate ? `Last: ${formatDateInTZ(item.lastReviewDate, 'MMM d')}` : 'Never practiced'}
+                              {item.lastReviewDate 
+                                ? `Last: ${formatDateInTZ(item.lastReviewDate, 'MMM d, yyyy')}` 
+                                : 'Backlog (Not yet practiced)'}
                             </span>
                           </div>
                         </td>
@@ -1122,6 +1214,156 @@ export default function App() {
                     onChange={e => setFormData({ ...formData, url: e.target.value })}
                     className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-gray-900"
                   />
+                </div>
+
+                {/* Practice Status & Dates Section */}
+                <div className="bg-gray-50 border border-gray-200 rounded-2xl p-4 space-y-3.5">
+                  <div className="flex items-center justify-between">
+                    <label className="flex items-center gap-2.5 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={formData.alreadyPracticed}
+                        onChange={e => {
+                          const checked = e.target.checked;
+                          setFormData(prev => ({
+                            ...prev,
+                            alreadyPracticed: checked,
+                            totalRepetitions: checked ? Math.max(1, prev.totalRepetitions || 1) : 0,
+                          }));
+                        }}
+                        className="w-4 h-4 rounded text-emerald-600 focus:ring-emerald-500 border-gray-300"
+                      />
+                      <span className="text-xs font-mono font-bold text-gray-900">
+                        I already solved / practiced this problem
+                      </span>
+                    </label>
+                    <span className={cn(
+                      "text-[10px] font-mono px-2 py-0.5 rounded font-bold uppercase",
+                      formData.alreadyPracticed ? "bg-emerald-100 text-emerald-800" : "bg-gray-200 text-gray-600"
+                    )}>
+                      {formData.alreadyPracticed ? "Completed" : "Backlog"}
+                    </span>
+                  </div>
+
+                  {formData.alreadyPracticed ? (
+                    <div className="space-y-3 pt-2 border-t border-gray-200/70">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-[11px] font-mono uppercase tracking-wider text-gray-500 mb-1">
+                            Last Practiced Date *
+                          </label>
+                          <input
+                            type="date"
+                            required={formData.alreadyPracticed}
+                            value={formData.lastPracticeDate}
+                            onChange={e => {
+                              const newLastDate = e.target.value;
+                              setFormData(prev => {
+                                let next = prev.nextReviewDate;
+                                if (newLastDate && (!next || next <= newLastDate)) {
+                                  try {
+                                    next = format(addDays(new Date(newLastDate), 1), 'yyyy-MM-dd');
+                                  } catch (err) {}
+                                }
+                                return {
+                                  ...prev,
+                                  lastPracticeDate: newLastDate,
+                                  nextReviewDate: next,
+                                };
+                              });
+                            }}
+                            className="w-full px-3 py-2 bg-white border border-gray-200 rounded-xl text-xs font-mono focus:outline-none focus:ring-2 focus:ring-gray-900"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block text-[11px] font-mono uppercase tracking-wider text-gray-500 mb-1">
+                            Next Scheduled Review *
+                          </label>
+                          <input
+                            type="date"
+                            required={formData.alreadyPracticed}
+                            value={formData.nextReviewDate}
+                            onChange={e => setFormData({ ...formData, nextReviewDate: e.target.value })}
+                            className="w-full px-3 py-2 bg-white border border-gray-200 rounded-xl text-xs font-mono focus:outline-none focus:ring-2 focus:ring-gray-900"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Quick Presets for Next Review */}
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="text-[10px] font-mono text-gray-400">Quick schedule next review:</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const base = formData.lastPracticeDate ? new Date(formData.lastPracticeDate) : getNowInTZ();
+                            setFormData({ ...formData, nextReviewDate: format(addDays(base, 1), 'yyyy-MM-dd') });
+                          }}
+                          className="px-2 py-0.5 bg-white border border-gray-200 hover:border-gray-400 rounded text-[10px] font-mono text-gray-700 transition-colors"
+                        >
+                          Tomorrow (+1d)
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const base = formData.lastPracticeDate ? new Date(formData.lastPracticeDate) : getNowInTZ();
+                            setFormData({ ...formData, nextReviewDate: format(addDays(base, 3), 'yyyy-MM-dd') });
+                          }}
+                          className="px-2 py-0.5 bg-white border border-gray-200 hover:border-gray-400 rounded text-[10px] font-mono text-gray-700 transition-colors"
+                        >
+                          +3 Days
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const base = formData.lastPracticeDate ? new Date(formData.lastPracticeDate) : getNowInTZ();
+                            setFormData({ ...formData, nextReviewDate: format(addDays(base, 7), 'yyyy-MM-dd') });
+                          }}
+                          className="px-2 py-0.5 bg-white border border-gray-200 hover:border-gray-400 rounded text-[10px] font-mono text-gray-700 transition-colors"
+                        >
+                          +1 Week
+                        </button>
+                      </div>
+
+                      {/* Solve time & Repetitions */}
+                      <div className="grid grid-cols-2 gap-3 pt-1">
+                        <div>
+                          <label className="block text-[11px] font-mono uppercase tracking-wider text-gray-500 mb-1">
+                            Solve Time (Mins)
+                          </label>
+                          <input
+                            type="number"
+                            min="0"
+                            placeholder="15"
+                            value={formData.initialSolveTimeMins}
+                            onChange={e => setFormData({ ...formData, initialSolveTimeMins: e.target.value })}
+                            className="w-full px-3 py-2 bg-white border border-gray-200 rounded-xl text-xs font-mono focus:outline-none focus:ring-2 focus:ring-gray-900"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] font-mono uppercase tracking-wider text-gray-500 mb-1">
+                            Times Solved
+                          </label>
+                          <input
+                            type="number"
+                            min="1"
+                            value={formData.totalRepetitions}
+                            onChange={e => setFormData({ ...formData, totalRepetitions: Math.max(1, parseInt(e.target.value) || 1) })}
+                            className="w-full px-3 py-2 bg-white border border-gray-200 rounded-xl text-xs font-mono focus:outline-none focus:ring-2 focus:ring-gray-900"
+                          />
+                        </div>
+                      </div>
+
+                      <p className="text-[11px] font-mono text-emerald-700 bg-emerald-50 p-2 rounded-lg border border-emerald-100 flex items-center gap-1.5">
+                        <CheckCircle2 className="w-3.5 h-3.5 flex-shrink-0 text-emerald-600" />
+                        <span>Saved as completed. It will not be re-prompted today and will wait until your scheduled Next Review date.</span>
+                      </p>
+                    </div>
+                  ) : (
+                    <p className="text-[11px] font-mono text-gray-500 bg-white p-2.5 rounded-lg border border-gray-200/70">
+                      ℹ️ This problem will be added to your study backlog ready for your initial practice.
+                    </p>
+                  )}
                 </div>
 
                 <div>
