@@ -1,13 +1,24 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { PracticeLink, Topic, Difficulty } from './types';
+import { PracticeLink, Topic, Difficulty, PracticeSessionRecord } from './types';
 import { updateCardSRS, isDue, calculatePriorityScore, getNowInTZ, formatDateInTZ, parseDateInTZ } from './lib/srs';
 import { PracticeLinkCard } from './components/PracticeLinkCard';
-import { getInitialProblems, saveLocalProblems, resetToStarterProblems, exportProblemsJSON, importProblemsJSON } from './lib/storage';
+import { PatternStatsBar } from './components/PatternStatsBar';
+import { 
+  getInitialProblems, 
+  saveLocalProblems, 
+  resetToStarterProblems, 
+  exportProblemsJSON, 
+  importProblemsJSON,
+  getPracticeHistory,
+  recordPracticeSession
+} from './lib/storage';
+import { calculateTopicAnalytics, getProblemPattern } from './lib/analytics';
+import { getStandardPatternsForTopic } from './data/patterns';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Plus, Sparkles, Database, Code2, CheckCircle2, BarChart3, Clock, 
   Filter, ExternalLink, Trash2, X, AlertCircle, RotateCcw, Pencil, 
-  Play, Download, Upload, Target, Flame, Search, ArrowRight, BookOpen, Layers, Calendar
+  Play, Download, Upload, Target, Flame, Search, ArrowRight, BookOpen, Layers, Calendar, Trophy, TrendingUp
 } from 'lucide-react';
 import { cn, formatTopicName, getTopicBadgeClass } from './lib/utils';
 import { differenceInDays, differenceInCalendarDays, parseISO, format, addDays, startOfDay } from 'date-fns';
@@ -35,9 +46,10 @@ function getInitialGoal(): GoalSettings {
 
 export default function App() {
   const [links, setLinks] = useState<PracticeLink[]>(() => getInitialProblems());
-  const [activeTopic, setActiveTopic] = useState<Topic | 'all'>('all');
+  const [practiceHistory, setPracticeHistory] = useState<PracticeSessionRecord[]>(() => getPracticeHistory());
+  const [activeScreen, setActiveScreen] = useState<'python' | 'sql' | 'system-design' | 'qa' | 'all'>('python');
+  const [selectedPattern, setSelectedPattern] = useState<string | 'all'>('all');
   const [activeDifficulty, setActiveDifficulty] = useState<Difficulty | 'all'>('all');
-  const [activeSubTopic, setActiveSubTopic] = useState<string | 'all'>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [onlyDue, setOnlyDue] = useState(false);
 
@@ -63,8 +75,10 @@ export default function App() {
   const [formData, setFormData] = useState({
     title: '',
     url: '',
-    topic: 'sql' as string,
+    topic: 'python' as string,
     customTopic: '',
+    pattern: 'Two Pointers',
+    customPattern: '',
     subTopic: '',
     difficulty: 'Intermediate' as Difficulty,
     personalDifficulty: 5,
@@ -107,28 +121,46 @@ export default function App() {
     };
   }, [goalSettings, links.length]);
 
-  // Dynamic list of all available topics (starter defaults + any user custom topics)
-  const availableTopics = useMemo(() => {
-    const set = new Set<string>();
-    links.forEach(l => {
-      if (l.topic) set.add(l.topic.toLowerCase().trim());
-    });
-    // Default categories
-    ['python', 'sql', 'system-design', 'qa'].forEach(t => set.add(t));
-    return ['all', ...Array.from(set)];
+  // Screen-specific due item counts for navigation badges
+  const pythonDueCount = useMemo(() => {
+    return links.filter(l => l.topic.toLowerCase().trim() === 'python' && isDue(l)).length;
   }, [links]);
 
-  // Subtopics list
-  const subTopics = useMemo(() => {
-    const set = new Set(links.map(l => l.subTopic).filter(Boolean));
-    return Array.from(set);
+  const sqlDueCount = useMemo(() => {
+    return links.filter(l => l.topic.toLowerCase().trim() === 'sql' && isDue(l)).length;
   }, [links]);
 
-  // Priority sorted items:
+  const systemDesignDueCount = useMemo(() => {
+    return links.filter(l => l.topic.toLowerCase().trim() === 'system-design' && isDue(l)).length;
+  }, [links]);
+
+  const qaDueCount = useMemo(() => {
+    return links.filter(l => l.topic.toLowerCase().trim() === 'qa' && isDue(l)).length;
+  }, [links]);
+
+  const allDueCount = useMemo(() => links.filter(isDue).length, [links]);
+
+  const pythonCount = useMemo(() => links.filter(l => l.topic.toLowerCase().trim() === 'python').length, [links]);
+  const sqlCount = useMemo(() => links.filter(l => l.topic.toLowerCase().trim() === 'sql').length, [links]);
+  const systemDesignCount = useMemo(() => links.filter(l => l.topic.toLowerCase().trim() === 'system-design').length, [links]);
+  const qaCount = useMemo(() => links.filter(l => l.topic.toLowerCase().trim() === 'qa').length, [links]);
+
+  // Problems matching the active topic screen
+  const currentScreenProblems = useMemo(() => {
+    if (activeScreen === 'all') return links;
+    return links.filter(l => l.topic.toLowerCase().trim() === activeScreen.toLowerCase().trim());
+  }, [links, activeScreen]);
+
+  // Topic Analytics computed for the active screen
+  const topicAnalytics = useMemo(() => {
+    return calculateTopicAnalytics(links, practiceHistory, activeScreen);
+  }, [links, practiceHistory, activeScreen]);
+
+  // Priority sorted items for current screen:
   // 1. Due items ALWAYS appear at the top, sorted by priority score (highest first).
   // 2. Non-due items appear below, sorted by next review date (soonest first).
   const sortedLinks = useMemo(() => {
-    return [...links].sort((a, b) => {
+    return [...currentScreenProblems].sort((a, b) => {
       const aDue = isDue(a);
       const bDue = isDue(b);
       
@@ -148,75 +180,74 @@ export default function App() {
 
       return (b.priorityScore || 0) - (a.priorityScore || 0);
     });
-  }, [links]);
+  }, [currentScreenProblems]);
+
+  // Due items list for current topic screen
+  const dueItems = useMemo(() => {
+    return sortedLinks.filter(isDue);
+  }, [sortedLinks]);
 
   // Filtered links for table
   const filteredLinks = useMemo(() => {
     return sortedLinks.filter(item => {
-      if (activeTopic !== 'all' && item.topic.toLowerCase().trim() !== activeTopic.toLowerCase().trim()) return false;
       if (activeDifficulty !== 'all' && item.difficulty !== activeDifficulty) return false;
-      if (activeSubTopic !== 'all' && item.subTopic !== activeSubTopic) return false;
+      if (selectedPattern !== 'all' && getProblemPattern(item).toLowerCase().trim() !== selectedPattern.toLowerCase().trim()) return false;
       if (onlyDue && !isDue(item)) return false;
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
         const matchTitle = item.title.toLowerCase().includes(q);
         const matchTopic = item.topic.toLowerCase().includes(q);
-        const matchSubTopic = item.subTopic?.toLowerCase().includes(q);
+        const matchPattern = getProblemPattern(item).toLowerCase().includes(q);
         const matchNotes = item.notes?.toLowerCase().includes(q);
-        if (!matchTitle && !matchTopic && !matchSubTopic && !matchNotes) return false;
+        if (!matchTitle && !matchTopic && !matchPattern && !matchNotes) return false;
       }
       return true;
     });
-  }, [sortedLinks, activeTopic, activeDifficulty, activeSubTopic, onlyDue, searchQuery]);
+  }, [sortedLinks, activeDifficulty, selectedPattern, onlyDue, searchQuery]);
 
-  // Due items list
-  const dueItems = useMemo(() => {
-    return sortedLinks.filter(isDue);
-  }, [sortedLinks]);
-
-  // Recommendation engine: Pick the top item needing attention
+  // Topic-specific Recommendation engine: Only recommends items for the current active screen!
   const topRecommendation = useMemo(() => {
-    if (links.length === 0) return null;
+    if (currentScreenProblems.length === 0) return null;
     
-    // First priority: highest priority due item
+    // First priority: highest priority due item in this topic
     if (dueItems.length > 0) {
       const topDue = dueItems[0];
       return {
         item: topDue,
         allCaughtUp: false,
         reason: topDue.totalRepetitions === 0 
-          ? 'New problem — ready for your initial practice!' 
-          : 'Spaced review is due to retain this concept long-term.'
+          ? `New ${formatTopicName(topDue.topic)} problem — ready for your initial practice!` 
+          : `Spaced review is due for this ${formatTopicName(topDue.topic)} concept.`
       };
     }
 
-    // Second: items never practiced
+    // Second: items never practiced in this topic
     const unpracticed = sortedLinks.find(l => (l.totalRepetitions || 0) === 0);
     if (unpracticed) {
       return {
         item: unpracticed,
         allCaughtUp: false,
-        reason: 'Recommended new topic to expand your interview syllabus.'
+        reason: `Recommended new ${formatTopicName(unpracticed.topic)} problem to expand your syllabus.`
       };
     }
 
-    // Check if everything was already reviewed recently (<16h)
+    // Check if everything in this topic was already reviewed recently (<16h)
     const allRecent = sortedLinks.length > 0 && sortedLinks.every(l => (l.priorityScore || 0) <= -1000000);
     if (allRecent) {
       return {
         item: sortedLinks[0],
         allCaughtUp: true,
-        reason: 'All caught up for today! 🎉 You completed your practice. All items are scheduled for future review.'
+        reason: `All caught up with ${activeScreen === 'all' ? 'all problems' : formatTopicName(activeScreen)} for today! 🎉 All reviews are scheduled for future dates.`
       };
     }
 
-    // Fallback: highest priority item overall
+    // Fallback: highest priority item overall in this topic
     return {
       item: sortedLinks[0],
       allCaughtUp: false,
       reason: 'Recommended for extra reinforcement.'
     };
-  }, [links, dueItems, sortedLinks]);
+  }, [currentScreenProblems, dueItems, sortedLinks, activeScreen]);
 
   // Progress stats
   const stats = useMemo(() => {
@@ -273,6 +304,17 @@ export default function App() {
       return l;
     }));
 
+    // Record session history
+    const record = recordPracticeSession({
+      problemId: currentPracticeItem.id,
+      problemTitle: currentPracticeItem.title,
+      topic: currentPracticeItem.topic,
+      pattern: getProblemPattern(currentPracticeItem),
+      solveTimeSeconds: solveTime,
+      quality,
+    });
+    setPracticeHistory(prev => [record, ...prev]);
+
     setSessionSuccessMessage(`Saved! Quality ${quality}/5 logged. Next review in ${updates.interval || 1} day(s).`);
     setTimeout(() => setSessionSuccessMessage(null), 4000);
 
@@ -316,6 +358,17 @@ export default function App() {
       return l;
     }));
 
+    // Record session history
+    const record = recordPracticeSession({
+      problemId: item.id,
+      problemTitle: item.title,
+      topic: item.topic,
+      pattern: getProblemPattern(item),
+      solveTimeSeconds: solveTime,
+      quality: 4,
+    });
+    setPracticeHistory(prev => [record, ...prev]);
+
     if (currentPracticeItem?.id === item.id) {
       setIsPracticing(false);
       setCurrentPracticeItem(null);
@@ -329,13 +382,18 @@ export default function App() {
   const handleOpenAdd = () => {
     const todayStr = format(getNowInTZ(), 'yyyy-MM-dd');
     const tomorrowStr = format(addDays(getNowInTZ(), 1), 'yyyy-MM-dd');
+    const defaultTopic = activeScreen === 'all' ? 'python' : activeScreen;
+    const defaultPatterns = getStandardPatternsForTopic(defaultTopic);
+
     setEditingId(null);
     setFormData({
       title: '',
       url: '',
-      topic: 'sql',
+      topic: defaultTopic,
       customTopic: '',
-      subTopic: '',
+      pattern: defaultPatterns[0] || 'General',
+      customPattern: '',
+      subTopic: defaultPatterns[0] || 'General',
       difficulty: 'Intermediate',
       personalDifficulty: 5,
       alreadyPracticed: true, // Default to true so newly solved problems don't get re-prompted today
@@ -363,12 +421,18 @@ export default function App() {
       ? formatDateInTZ(item.nextReviewDate, 'yyyy-MM-dd') 
       : format(addDays(getNowInTZ(), 1), 'yyyy-MM-dd');
 
+    const itemPat = getProblemPattern(item);
+    const standardPatterns = getStandardPatternsForTopic(item.topic);
+    const isStandardPat = standardPatterns.some(p => p.toLowerCase() === itemPat.toLowerCase());
+
     setFormData({
       title: item.title,
       url: item.url || '',
       topic: isStandard ? item.topic.toLowerCase().trim() : '__custom__',
       customTopic: isStandard ? '' : item.topic,
-      subTopic: item.subTopic || '',
+      pattern: isStandardPat ? itemPat : '__custom__',
+      customPattern: isStandardPat ? '' : itemPat,
+      subTopic: itemPat,
       difficulty: item.difficulty,
       personalDifficulty: item.personalDifficulty || 5,
       alreadyPracticed: Boolean(item.lastReviewDate && item.totalRepetitions > 0),
@@ -395,6 +459,10 @@ export default function App() {
     const effectiveTopic = formData.topic === '__custom__'
       ? (formData.customTopic.trim() || 'General')
       : formData.topic;
+
+    const effectivePattern = formData.pattern === '__custom__'
+      ? (formData.customPattern.trim() || 'General')
+      : (formData.pattern.trim() || formData.subTopic.trim() || 'General');
 
     const now = getNowInTZ();
     const nowIso = now.toISOString();
@@ -427,7 +495,8 @@ export default function App() {
             title: formData.title,
             url: formData.url,
             topic: effectiveTopic,
-            subTopic: formData.subTopic || 'General',
+            subTopic: effectivePattern,
+            pattern: effectivePattern,
             difficulty: formData.difficulty,
             personalDifficulty: formData.personalDifficulty,
             notes: formData.notes,
@@ -465,7 +534,8 @@ export default function App() {
         title: formData.title,
         url: formData.url,
         topic: effectiveTopic,
-        subTopic: formData.subTopic || 'General',
+        subTopic: effectivePattern,
+        pattern: effectivePattern,
         difficulty: formData.difficulty,
         personalDifficulty: formData.personalDifficulty,
         notes: formData.notes,
@@ -591,6 +661,64 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      {/* Topic-Focused Screen Navigation */}
+      <div className="bg-white border-b border-gray-200 px-4 sm:px-6 py-2.5 sticky top-[73px] z-30 shadow-[0_1px_3px_rgba(0,0,0,0.02)]">
+        <div className="max-w-7xl mx-auto flex items-center justify-between gap-4">
+          <div className="flex items-center gap-2 overflow-x-auto py-1 scrollbar-none">
+            {[
+              { id: 'python', label: 'Python / Coding', icon: Code2, count: pythonCount, due: pythonDueCount, color: 'text-blue-600' },
+              { id: 'sql', label: 'SQL', icon: Database, count: sqlCount, due: sqlDueCount, color: 'text-indigo-600' },
+              { id: 'system-design', label: 'System Design', icon: Layers, count: systemDesignCount, due: systemDesignDueCount, color: 'text-purple-600' },
+              { id: 'qa', label: 'Q&A / Conceptual', icon: BookOpen, count: qaCount, due: qaDueCount, color: 'text-teal-600' },
+              { id: 'all', label: 'All Topics', icon: Flame, count: links.length, due: allDueCount, color: 'text-amber-600' },
+            ].map(tab => {
+              const isActive = activeScreen === tab.id;
+              const Icon = tab.icon;
+              return (
+                <button
+                  key={tab.id}
+                  onClick={() => {
+                    setActiveScreen(tab.id as any);
+                    setSelectedPattern('all');
+                  }}
+                  className={cn(
+                    "px-4 py-2 rounded-2xl text-xs font-mono font-bold flex items-center gap-2 transition-all flex-shrink-0 cursor-pointer",
+                    isActive
+                      ? "bg-gray-900 text-white shadow-sm ring-1 ring-gray-900"
+                      : "bg-gray-50/80 text-gray-600 hover:bg-gray-100 hover:text-gray-900 border border-gray-200/60"
+                  )}
+                >
+                  <Icon className={cn("w-4 h-4", isActive ? "text-white" : tab.color)} />
+                  <span>{tab.label}</span>
+                  <span className={cn(
+                    "px-1.5 py-0.5 rounded-full text-[10px]",
+                    isActive ? "bg-white/20 text-white" : "bg-gray-200/80 text-gray-700"
+                  )}>
+                    {tab.count}
+                  </span>
+                  {tab.due > 0 && (
+                    <span className="px-1.5 py-0.5 rounded-full text-[10px] bg-amber-500 text-white font-bold animate-pulse">
+                      {tab.due} due
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          {dueItems.length > 0 && (
+            <button
+              onClick={() => handleStartPractice(dueItems[0])}
+              className="hidden md:flex items-center gap-1.5 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-mono font-bold shadow-sm transition-all flex-shrink-0 cursor-pointer"
+              title={`Start practicing due problems for ${activeScreen === 'all' ? 'all topics' : formatTopicName(activeScreen)}`}
+            >
+              <Play className="w-3.5 h-3.5 fill-current" />
+              <span>Practice Queue ({dueItems.length} Due)</span>
+            </button>
+          )}
+        </div>
+      </div>
 
       {/* Main Container */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 py-8 space-y-8">
@@ -772,19 +900,29 @@ export default function App() {
                   </p>
                 </div>
 
-                <div className="flex items-center gap-3 pt-2">
+                <div className="flex items-center gap-3 pt-2 flex-wrap">
                   <button
                     onClick={() => handleStartPractice(topRecommendation.item)}
                     className={cn(
-                      "px-6 py-3 rounded-2xl font-medium text-sm transition-all flex items-center gap-2 shadow-md group",
+                      "px-6 py-3 rounded-2xl font-medium text-sm transition-all flex items-center gap-2 shadow-md group cursor-pointer",
                       topRecommendation.allCaughtUp
                         ? "bg-gray-900 hover:bg-black text-white shadow-gray-200"
                         : "bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-100"
                     )}
                   >
                     <Play className="w-4 h-4 fill-current group-hover:scale-110 transition-transform" />
-                    <span>{topRecommendation.allCaughtUp ? 'Practice Ahead (Optional)' : 'Start Recommended Practice'}</span>
+                    <span>{topRecommendation.allCaughtUp ? 'Practice Ahead (Optional)' : `Start ${activeScreen === 'all' ? '' : formatTopicName(activeScreen) + ' '}Practice`}</span>
                   </button>
+                  {dueItems.length > 1 && (
+                    <button
+                      onClick={() => handleStartPractice(dueItems[0])}
+                      className="px-4 py-3 bg-gray-100 hover:bg-gray-200 text-gray-800 rounded-2xl text-xs font-mono font-bold transition-colors flex items-center gap-1.5 cursor-pointer"
+                      title="Practice all due problems in this topic back-to-back"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      <span>Practice Queue ({dueItems.length} Due)</span>
+                    </button>
+                  )}
                   {topRecommendation.item.url && (
                     <a
                       href={topRecommendation.item.url}
@@ -801,10 +939,10 @@ export default function App() {
             ) : (
               <div className="flex flex-col items-center justify-center py-8 text-center text-gray-400">
                 <BookOpen className="w-8 h-8 mb-2 stroke-1" />
-                <p className="text-sm font-serif">No problems added yet.</p>
+                <p className="text-sm font-serif">No problems added yet for {formatTopicName(activeScreen)}.</p>
                 <button
                   onClick={handleResetToStarters}
-                  className="mt-3 px-4 py-2 bg-gray-900 text-white rounded-xl text-xs font-medium"
+                  className="mt-3 px-4 py-2 bg-gray-900 text-white rounded-xl text-xs font-medium cursor-pointer"
                 >
                   Load Curated Starter Problems
                 </button>
@@ -813,103 +951,55 @@ export default function App() {
           </div>
         </div>
 
-        {/* Progress Metrics Overview */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <div className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm flex items-center gap-4">
-            <div className="w-12 h-12 bg-blue-50 text-blue-600 rounded-2xl flex items-center justify-center flex-shrink-0">
-              <Layers className="w-6 h-6" />
-            </div>
-            <div>
-              <p className="text-[10px] font-mono uppercase tracking-wider text-gray-400">Total Tracked</p>
-              <p className="text-2xl font-serif font-bold text-gray-900">{stats.total}</p>
-            </div>
-          </div>
-
-          <div className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm flex items-center gap-4">
-            <div className="w-12 h-12 bg-amber-50 text-amber-600 rounded-2xl flex items-center justify-center flex-shrink-0">
-              <Clock className="w-6 h-6" />
-            </div>
-            <div>
-              <p className="text-[10px] font-mono uppercase tracking-wider text-gray-400">Due for Review</p>
-              <p className="text-2xl font-serif font-bold text-amber-600">{stats.dueCount}</p>
-            </div>
-          </div>
-
-          <div className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm flex items-center gap-4">
-            <div className="w-12 h-12 bg-emerald-50 text-emerald-600 rounded-2xl flex items-center justify-center flex-shrink-0">
-              <CheckCircle2 className="w-6 h-6" />
-            </div>
-            <div>
-              <p className="text-[10px] font-mono uppercase tracking-wider text-gray-400">Mastery</p>
-              <p className="text-2xl font-serif font-bold text-gray-900">{stats.masteryPercent}%</p>
-            </div>
-          </div>
-
-          <div className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm flex items-center gap-4">
-            <div className="w-12 h-12 bg-purple-50 text-purple-600 rounded-2xl flex items-center justify-center flex-shrink-0">
-              <Flame className="w-6 h-6" />
-            </div>
-            <div>
-              <p className="text-[10px] font-mono uppercase tracking-wider text-gray-400">Total Practice</p>
-              <p className="text-2xl font-serif font-bold text-gray-900">{stats.totalReviews}x</p>
-            </div>
-          </div>
-        </div>
-
-        {/* Dynamic Topic Mastery Cards */}
-        {stats.topicBreakdown && stats.topicBreakdown.length > 0 && (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {stats.topicBreakdown.slice(0, 4).map(tb => (
-              <div key={tb.topic} className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm space-y-2.5">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className={cn(
-                      "px-2 py-0.5 rounded text-[11px] font-mono font-bold uppercase border",
-                      getTopicBadgeClass(tb.topic)
-                    )}>
-                      {formatTopicName(tb.topic)}
-                    </span>
-                    <span className="text-[11px] text-gray-400 font-mono">
-                      {tb.mastered} / {tb.count}
-                    </span>
-                  </div>
-                  <span className="text-xs font-mono font-bold text-gray-800">{tb.percent}%</span>
-                </div>
-                <div className="w-full h-2 bg-gray-100 rounded-full overflow-hidden">
-                  <div 
-                    className="h-full bg-gray-900 rounded-full transition-all duration-500" 
-                    style={{ width: `${tb.percent}%` }} 
-                  />
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
+        {/* Topic-Focused Practice Stats & Pattern Curriculum */}
+        <PatternStatsBar
+          analytics={topicAnalytics}
+          activeTopic={activeScreen}
+          selectedPattern={selectedPattern}
+          onSelectPattern={setSelectedPattern}
+          onStartPatternPractice={(pattern) => {
+            setSelectedPattern(pattern);
+            const patternProblems = currentScreenProblems.filter(p => getProblemPattern(p).toLowerCase() === pattern.toLowerCase());
+            const dueProblem = patternProblems.find(isDue);
+            if (dueProblem) {
+              handleStartPractice(dueProblem);
+            } else if (patternProblems.length > 0) {
+              handleStartPractice(patternProblems[0]);
+            }
+          }}
+        />
 
         {/* Filters and Search Bar */}
         <div className="bg-white p-4 sm:p-5 rounded-3xl border border-gray-100 shadow-sm flex flex-wrap gap-4 items-center justify-between">
-          <div className="flex flex-wrap gap-2 items-center">
-            {/* Topic Filter Buttons */}
-            <div className="flex flex-wrap gap-1 bg-gray-50 p-1 rounded-2xl border border-gray-100">
-              {availableTopics.map(t => (
-                <button
-                  key={t}
-                  onClick={() => setActiveTopic(t)}
-                  className={cn(
-                    "px-3 py-1.5 rounded-xl text-xs font-mono font-bold uppercase tracking-wider transition-all",
-                    activeTopic === t ? "bg-gray-900 text-white shadow-sm" : "text-gray-500 hover:text-gray-900"
-                  )}
-                >
-                  {t === 'all' ? 'All' : formatTopicName(t)}
-                </button>
-              ))}
+          <div className="flex flex-wrap gap-2.5 items-center">
+            {/* Active Topic Screen Indicator */}
+            <div className="flex items-center gap-2 px-3 py-2 bg-gray-100 rounded-2xl text-xs font-mono font-bold text-gray-800">
+              <span className="w-2 h-2 rounded-full bg-emerald-500" />
+              <span>{activeScreen === 'all' ? 'All Topics' : formatTopicName(activeScreen)} Catalog</span>
+              <span className="px-1.5 py-0.2 bg-white rounded-md text-[10px] text-gray-600 font-semibold shadow-xs">
+                {filteredLinks.length}
+              </span>
             </div>
+
+            {/* Pattern Filter Dropdown */}
+            <select
+              value={selectedPattern}
+              onChange={e => setSelectedPattern(e.target.value)}
+              className="px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs font-mono text-gray-700 focus:outline-none max-w-[200px] truncate"
+            >
+              <option value="all">All Patterns ({currentScreenProblems.length})</option>
+              {topicAnalytics.patternMetrics.map(pm => (
+                <option key={pm.name} value={pm.name}>
+                  {pm.name} ({pm.problemsCount})
+                </option>
+              ))}
+            </select>
 
             {/* Difficulty Filter */}
             <select
               value={activeDifficulty}
               onChange={e => setActiveDifficulty(e.target.value as any)}
-              className="px-3 py-2 bg-gray-50 border border-gray-100 rounded-xl text-xs font-mono text-gray-700 focus:outline-none"
+              className="px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs font-mono text-gray-700 focus:outline-none"
             >
               <option value="all">All Difficulties</option>
               <option value="Beginner">Beginner</option>
@@ -917,33 +1007,34 @@ export default function App() {
               <option value="Advanced">Advanced</option>
             </select>
 
-            {/* Subtopic Filter */}
-            {subTopics.length > 0 && (
-              <select
-                value={activeSubTopic}
-                onChange={e => setActiveSubTopic(e.target.value)}
-                className="px-3 py-2 bg-gray-50 border border-gray-100 rounded-xl text-xs font-mono text-gray-700 focus:outline-none max-w-[160px] truncate"
-              >
-                <option value="all">All Subtopics</option>
-                {subTopics.map(st => (
-                  <option key={st} value={st}>{st}</option>
-                ))}
-              </select>
-            )}
-
             {/* Only Due Toggle */}
             <button
               onClick={() => setOnlyDue(!onlyDue)}
               className={cn(
-                "px-3 py-2 rounded-xl text-xs font-mono font-medium transition-all flex items-center gap-1.5",
+                "px-3 py-2 rounded-xl text-xs font-mono font-medium transition-all flex items-center gap-1.5 cursor-pointer",
                 onlyDue
-                  ? "bg-amber-100 text-amber-800 border border-amber-200"
-                  : "bg-gray-50 text-gray-600 hover:bg-gray-100 border border-gray-100"
+                  ? "bg-amber-100 text-amber-800 border border-amber-300 shadow-sm"
+                  : "bg-gray-50 text-gray-600 hover:bg-gray-100 border border-gray-200"
               )}
             >
               <Clock className="w-3.5 h-3.5" />
               <span>Only Due ({dueItems.length})</span>
             </button>
+
+            {/* Reset Filters button if any filter is active */}
+            {(selectedPattern !== 'all' || activeDifficulty !== 'all' || onlyDue || searchQuery.trim() !== '') && (
+              <button
+                onClick={() => {
+                  setSelectedPattern('all');
+                  setActiveDifficulty('all');
+                  setOnlyDue(false);
+                  setSearchQuery('');
+                }}
+                className="px-2.5 py-1.5 text-xs font-mono text-blue-600 hover:text-blue-800 transition-colors cursor-pointer"
+              >
+                Reset Filters
+              </button>
+            )}
           </div>
 
           {/* Search Input */}
@@ -951,10 +1042,10 @@ export default function App() {
             <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
             <input
               type="text"
-              placeholder="Search problems, notes..."
+              placeholder={`Search ${activeScreen === 'all' ? 'all' : formatTopicName(activeScreen)} problems, notes...`}
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
-              className="w-full pl-9 pr-4 py-2 bg-gray-50 border border-gray-100 rounded-xl text-xs text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900"
+              className="w-full pl-9 pr-4 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900"
             />
           </div>
         </div>
@@ -981,9 +1072,8 @@ export default function App() {
               <p>No practice items match your current filter.</p>
               <button
                 onClick={() => {
-                  setActiveTopic('all');
+                  setSelectedPattern('all');
                   setActiveDifficulty('all');
-                  setActiveSubTopic('all');
                   setOnlyDue(false);
                   setSearchQuery('');
                 }}
@@ -1071,8 +1161,8 @@ export default function App() {
                             )}>
                               {formatTopicName(item.topic)}
                             </span>
-                            <span className="text-[11px] font-mono text-gray-500 truncate max-w-[140px]">
-                              {item.subTopic || 'General'}
+                            <span className="text-[11px] font-mono text-gray-600 font-medium truncate max-w-[160px]">
+                              {getProblemPattern(item)}
                             </span>
                           </div>
                         </td>
@@ -1201,11 +1291,21 @@ export default function App() {
                     </label>
                     <select
                       value={formData.topic}
-                      onChange={e => setFormData({ ...formData, topic: e.target.value })}
+                      onChange={e => {
+                        const newTopic = e.target.value;
+                        const standardPatterns = getStandardPatternsForTopic(newTopic);
+                        setFormData({
+                          ...formData,
+                          topic: newTopic,
+                          pattern: standardPatterns[0] || 'General',
+                          customPattern: '',
+                          subTopic: standardPatterns[0] || 'General',
+                        });
+                      }}
                       className="w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-gray-900"
                     >
+                      <option value="python">Python / Coding</option>
                       <option value="sql">SQL</option>
-                      <option value="python">Python</option>
                       <option value="system-design">System Design</option>
                       <option value="qa">Q&A / Conceptual</option>
                       <option value="algorithms">Algorithms & Data Structures</option>
@@ -1249,15 +1349,25 @@ export default function App() {
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <label className="block text-xs font-mono uppercase tracking-wider text-gray-500 mb-1.5">
-                      Subtopic / Area
+                      Pattern / Technique *
                     </label>
-                    <input
-                      type="text"
-                      placeholder="e.g., CTE, Window Functions, DP"
-                      value={formData.subTopic}
-                      onChange={e => setFormData({ ...formData, subTopic: e.target.value })}
+                    <select
+                      value={formData.pattern}
+                      onChange={e => {
+                        const pat = e.target.value;
+                        setFormData({
+                          ...formData,
+                          pattern: pat,
+                          subTopic: pat === '__custom__' ? formData.customPattern : pat,
+                        });
+                      }}
                       className="w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-gray-900"
-                    />
+                    >
+                      {getStandardPatternsForTopic(formData.topic).map(p => (
+                        <option key={p} value={p}>{p}</option>
+                      ))}
+                      <option value="__custom__">+ Custom Pattern...</option>
+                    </select>
                   </div>
 
                   <div>
@@ -1274,6 +1384,22 @@ export default function App() {
                     />
                   </div>
                 </div>
+
+                {formData.pattern === '__custom__' && (
+                  <div>
+                    <label className="block text-xs font-mono uppercase tracking-wider text-gray-500 mb-1.5">
+                      Custom Pattern Name *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g., Interval Tree, Monotonic Stack, Backtracking..."
+                      value={formData.customPattern}
+                      onChange={e => setFormData({ ...formData, customPattern: e.target.value, subTopic: e.target.value })}
+                      className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-gray-900"
+                    />
+                  </div>
+                )}
 
                 <div>
                   <label className="block text-xs font-mono uppercase tracking-wider text-gray-500 mb-1.5">

@@ -104,3 +104,54 @@ export function importProblemsJSON(jsonStr: string): PracticeLink[] {
   saveLocalProblems(valid);
   return valid;
 }
+
+const HISTORY_STORAGE_KEY = 'coderecall_practice_history_v1';
+
+export function getPracticeHistory(): import('../types').PracticeSessionRecord[] {
+  try {
+    const saved = localStorage.getItem(HISTORY_STORAGE_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch (err) {
+    console.error('Failed to load practice history:', err);
+  }
+  return [];
+}
+
+export function savePracticeHistory(history: import('../types').PracticeSessionRecord[]): void {
+  try {
+    localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(history));
+  } catch (err) {
+    console.error('Failed to save practice history:', err);
+  }
+}
+
+export function recordPracticeSession(
+  item: {
+    problemId: string;
+    problemTitle: string;
+    topic: string;
+    pattern: string;
+    solveTimeSeconds: number;
+    quality: number;
+    timestamp?: string;
+  }
+): import('../types').PracticeSessionRecord {
+  const history = getPracticeHistory();
+  const record: import('../types').PracticeSessionRecord = {
+    id: `sess-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+    problemId: item.problemId,
+    problemTitle: item.problemTitle,
+    topic: item.topic,
+    pattern: item.pattern || 'General',
+    timestamp: item.timestamp || new Date().toISOString(),
+    solveTimeSeconds: item.solveTimeSeconds || 0,
+    quality: item.quality || 4,
+  };
+  const updated = [record, ...history];
+  savePracticeHistory(updated);
+  return record;
+}
+

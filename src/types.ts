@@ -8,6 +8,7 @@ export interface PracticeLink {
   title: string;
   topic: Topic;
   subTopic: string;
+  pattern?: string; // Standard pattern e.g. 'Two Pointers', 'Cyclic Sort', 'Window Functions'
   difficulty: Difficulty;
   notes?: string;
   transcript?: string;
@@ -33,6 +34,17 @@ export interface PracticeLink {
 }
 
 export type Card = PracticeLink; // Keep alias for compatibility
+
+export interface PracticeSessionRecord {
+  id: string;
+  problemId: string;
+  problemTitle: string;
+  topic: string;
+  pattern: string;
+  timestamp: string; // ISO date string
+  solveTimeSeconds: number;
+  quality: number; // 1-5 rating, or 4 for quick mark done
+}
 
 export interface UserProfile {
   uid: string;
