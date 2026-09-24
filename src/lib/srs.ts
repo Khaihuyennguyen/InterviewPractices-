@@ -50,19 +50,28 @@ export function parseDateInTZ(dateStr: string): string {
  */
 export function calculatePriorityScore(card: Card): number {
   const now = getNowInTZ();
-  const lastReview = card.lastReviewDate ? toZonedTime(new Date(card.lastReviewDate), TIMEZONE) : toZonedTime(new Date(card.createdAt), TIMEZONE);
-  
-  const hoursSinceLastReview = Math.max(0, differenceInHours(now, lastReview));
-  const daysSinceLastReview = Math.max(0, differenceInCalendarDays(now, lastReview));
-  
   // SCIENTIST'S RULE: The Spacing Effect
-  // We use a 16-hour window for "Today" to avoid UTC midnight flips.
-  // If you practiced recently, your memory is too fresh for effective review.
-  if (hoursSinceLastReview < 16) {
-    // FORCE RULE: Return a massive negative score to ensure it stays at the absolute bottom.
-    // Even if other items have 0 priority, this will be lower.
-    return -1000000;
+  // If practiced within the last 16 hours, memory is too fresh for review.
+  // NOTE: This ONLY applies if the card was actually practiced (lastReviewDate exists).
+  // Unpracticed cards must NOT be penalized by when they were created!
+  if (card.lastReviewDate) {
+    const lastReview = toZonedTime(new Date(card.lastReviewDate), TIMEZONE);
+    const hoursSinceLastReview = Math.max(0, differenceInHours(now, lastReview));
+    if (hoursSinceLastReview < 16) {
+      return -1000000;
+    }
   }
+
+  // If card has never been reviewed, it is ready for its initial practice
+  if (!card.lastReviewDate) {
+    const baseScore = 8000; // High priority for initial practice
+    const personalDiffScore = (card.personalDifficulty || 5) * 500;
+    const objectiveDiffScore = card.difficulty === 'Advanced' ? 2000 : card.difficulty === 'Intermediate' ? 1000 : 0;
+    return Math.round(baseScore + personalDiffScore + objectiveDiffScore);
+  }
+
+  const lastReview = toZonedTime(new Date(card.lastReviewDate), TIMEZONE);
+  const daysSinceLastReview = Math.max(0, differenceInCalendarDays(now, lastReview));
 
   // FORGETTING CURVE LOGIC:
   // We calculate how "Overdue" a card is relative to its scheduled interval.

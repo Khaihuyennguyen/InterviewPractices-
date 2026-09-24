@@ -124,9 +124,30 @@ export default function App() {
     return Array.from(set);
   }, [links]);
 
-  // Priority sorted items
+  // Priority sorted items:
+  // 1. Due items ALWAYS appear at the top, sorted by priority score (highest first).
+  // 2. Non-due items appear below, sorted by next review date (soonest first).
   const sortedLinks = useMemo(() => {
-    return [...links].sort((a, b) => (b.priorityScore || 0) - (a.priorityScore || 0));
+    return [...links].sort((a, b) => {
+      const aDue = isDue(a);
+      const bDue = isDue(b);
+      
+      // Due items always come before non-due items
+      if (aDue && !bDue) return -1;
+      if (!aDue && bDue) return 1;
+
+      // If both are due, sort by priority score descending
+      if (aDue && bDue) {
+        return (b.priorityScore || 0) - (a.priorityScore || 0);
+      }
+
+      // If neither is due, sort by next review date ascending (soonest first)
+      const aNext = a.nextReviewDate ? new Date(a.nextReviewDate).getTime() : 0;
+      const bNext = b.nextReviewDate ? new Date(b.nextReviewDate).getTime() : 0;
+      if (aNext !== bNext) return aNext - bNext;
+
+      return (b.priorityScore || 0) - (a.priorityScore || 0);
+    });
   }, [links]);
 
   // Filtered links for table
@@ -263,6 +284,45 @@ export default function App() {
       setIsPracticing(false);
       setCurrentPracticeItem(null);
     }
+  };
+
+  // Quick mark problem as solved today directly from table row
+  const handleQuickMarkDone = (item: PracticeLink) => {
+    const now = getNowInTZ();
+    const tomorrow = addDays(startOfDay(now), 1);
+    const newTotalRepetitions = Math.max(1, (item.totalRepetitions || 0) + 1);
+    const newRepetitions = Math.max(1, (item.repetitions || 0) + 1);
+    const newInterval = 1;
+    const solveTime = item.lastSolveTime && item.lastSolveTime > 0 ? item.lastSolveTime : 900;
+    
+    setLinks(prev => prev.map(l => {
+      if (l.id === item.id) {
+        const updated: PracticeLink = {
+          ...l,
+          repetitions: newRepetitions,
+          interval: newInterval,
+          lastReviewDate: now.toISOString(),
+          nextReviewDate: tomorrow.toISOString(),
+          totalRepetitions: newTotalRepetitions,
+          totalTimeSpent: (l.totalTimeSpent || 0) + solveTime,
+          lastSolveTime: solveTime,
+          averageSolveTime: Math.round(((l.totalTimeSpent || 0) + solveTime) / newTotalRepetitions),
+        };
+        return {
+          ...updated,
+          priorityScore: calculatePriorityScore(updated)
+        };
+      }
+      return l;
+    }));
+
+    if (currentPracticeItem?.id === item.id) {
+      setIsPracticing(false);
+      setCurrentPracticeItem(null);
+    }
+
+    setSessionSuccessMessage(`Marked "${item.title}" as completed today! 🎉 Next review scheduled for tomorrow (${format(tomorrow, 'MMM d')}).`);
+    setTimeout(() => setSessionSuccessMessage(null), 4000);
   };
 
   // Open add modal
@@ -953,19 +1013,31 @@ export default function App() {
                       <tr key={item.id} className="hover:bg-gray-50/70 transition-colors group">
                         {/* Practice Button */}
                         <td className="px-6 py-4">
-                          <button
-                            onClick={() => handleStartPractice(item)}
-                            className={cn(
-                              "p-2.5 rounded-xl transition-all shadow-sm flex items-center gap-1.5 text-xs font-mono font-medium",
-                              itemIsDue
-                                ? "bg-emerald-600 text-white hover:bg-emerald-700"
-                                : "bg-gray-100 text-gray-700 hover:bg-gray-900 hover:text-white"
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              onClick={() => handleStartPractice(item)}
+                              className={cn(
+                                "p-2 sm:px-3 sm:py-2 rounded-xl transition-all shadow-sm flex items-center gap-1.5 text-xs font-mono font-medium",
+                                itemIsDue
+                                  ? "bg-emerald-600 text-white hover:bg-emerald-700"
+                                  : "bg-gray-100 text-gray-700 hover:bg-gray-900 hover:text-white"
+                              )}
+                              title="Practice problem now"
+                            >
+                              <Play className="w-3.5 h-3.5 fill-current" />
+                              <span className="hidden sm:inline">Practice</span>
+                            </button>
+                            {itemIsDue && (
+                              <button
+                                onClick={() => handleQuickMarkDone(item)}
+                                className="p-2 sm:px-2.5 sm:py-2 rounded-xl border border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-600 hover:text-white transition-all text-xs font-mono font-medium flex items-center gap-1"
+                                title="One-click: I already solved this today! Mark done & schedule next review for tomorrow."
+                              >
+                                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 hover:text-white" />
+                                <span>Done</span>
+                              </button>
                             )}
-                            title="Practice problem now"
-                          >
-                            <Play className="w-3.5 h-3.5 fill-current" />
-                            <span className="hidden sm:inline">Practice</span>
-                          </button>
+                          </div>
                         </td>
 
                         {/* Problem Title & External Link */}
@@ -1218,31 +1290,65 @@ export default function App() {
 
                 {/* Practice Status & Dates Section */}
                 <div className="bg-gray-50 border border-gray-200 rounded-2xl p-4 space-y-3.5">
-                  <div className="flex items-center justify-between">
-                    <label className="flex items-center gap-2.5 cursor-pointer select-none">
-                      <input
-                        type="checkbox"
-                        checked={formData.alreadyPracticed}
-                        onChange={e => {
-                          const checked = e.target.checked;
+                  <div>
+                    <label className="block text-xs font-mono uppercase tracking-wider text-gray-500 mb-2">
+                      Practice Status *
+                    </label>
+                    <div className="grid grid-cols-2 gap-3">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const todayStr = format(getNowInTZ(), 'yyyy-MM-dd');
+                          const tomorrowStr = format(addDays(getNowInTZ(), 1), 'yyyy-MM-dd');
                           setFormData(prev => ({
                             ...prev,
-                            alreadyPracticed: checked,
-                            totalRepetitions: checked ? Math.max(1, prev.totalRepetitions || 1) : 0,
+                            alreadyPracticed: true,
+                            lastPracticeDate: prev.lastPracticeDate || todayStr,
+                            nextReviewDate: prev.nextReviewDate || tomorrowStr,
+                            totalRepetitions: Math.max(1, prev.totalRepetitions || 1),
                           }));
                         }}
-                        className="w-4 h-4 rounded text-emerald-600 focus:ring-emerald-500 border-gray-300"
-                      />
-                      <span className="text-xs font-mono font-bold text-gray-900">
-                        I already solved / practiced this problem
-                      </span>
-                    </label>
-                    <span className={cn(
-                      "text-[10px] font-mono px-2 py-0.5 rounded font-bold uppercase",
-                      formData.alreadyPracticed ? "bg-emerald-100 text-emerald-800" : "bg-gray-200 text-gray-600"
-                    )}>
-                      {formData.alreadyPracticed ? "Completed" : "Backlog"}
-                    </span>
+                        className={cn(
+                          "p-3 rounded-2xl border text-left transition-all flex flex-col gap-1 cursor-pointer",
+                          formData.alreadyPracticed
+                            ? "bg-emerald-50 border-emerald-500 text-emerald-950 ring-2 ring-emerald-500/20"
+                            : "bg-white border-gray-200 text-gray-600 hover:border-gray-300"
+                        )}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-bold font-mono text-emerald-900">✅ Solved / Done</span>
+                          {formData.alreadyPracticed && <CheckCircle2 className="w-4 h-4 text-emerald-600" />}
+                        </div>
+                        <span className="text-[11px] text-gray-500">
+                          I already solved this today. Review will be scheduled for tomorrow.
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setFormData(prev => ({
+                            ...prev,
+                            alreadyPracticed: false,
+                            totalRepetitions: 0,
+                          }));
+                        }}
+                        className={cn(
+                          "p-3 rounded-2xl border text-left transition-all flex flex-col gap-1 cursor-pointer",
+                          !formData.alreadyPracticed
+                            ? "bg-amber-50 border-amber-500 text-amber-950 ring-2 ring-amber-500/20"
+                            : "bg-white border-gray-200 text-gray-600 hover:border-gray-300"
+                        )}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-bold font-mono text-amber-900">⏳ To-Do / Backlog</span>
+                          {!formData.alreadyPracticed && <Clock className="w-4 h-4 text-amber-600" />}
+                        </div>
+                        <span className="text-[11px] text-gray-500">
+                          Haven't solved it yet. Put in queue for upcoming practice.
+                        </span>
+                      </button>
+                    </div>
                   </div>
 
                   {formData.alreadyPracticed ? (
