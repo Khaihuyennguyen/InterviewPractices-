@@ -4,6 +4,7 @@ import { PracticeLink } from '../types';
 import { cn, formatTopicName, getTopicBadgeClass } from '../lib/utils';
 import { Check, X, RotateCcw, ExternalLink, Clock, Sparkles, Code2, Play, Pause, BookOpen, ChevronDown, ChevronUp } from 'lucide-react';
 import Markdown from 'react-markdown';
+import { AudioAnswerRecorder } from './AudioAnswerRecorder';
 
 interface PracticeLinkCardProps {
   link: PracticeLink;
@@ -159,6 +160,18 @@ export const PracticeLinkCard: React.FC<PracticeLinkCardProps> = ({ link, onRate
             </AnimatePresence>
           </div>
         )}
+
+        {/* Voice Answer Recording & Pronunciation / Correctness Evaluator */}
+        <AudioAnswerRecorder
+          problem={link}
+          onApplyRating={(quality, solveTime) => {
+            const m = Math.floor(solveTime / 60).toString();
+            const s = (solveTime % 60).toString();
+            setMins(m);
+            setSecs(s);
+            onRate(quality, solveTime, personalDifficulty);
+          }}
+        />
 
         {/* Practice Stats & Rating Controls */}
         <div className="pt-6 border-t border-gray-100 flex flex-col gap-6">
